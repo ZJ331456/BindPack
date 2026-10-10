@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bindpack"
+version = "0.1.0"
+description = "BindPack: source-bound dependency execution and evidence package selection for multi-hop RAG"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+index-quality = ["xgrammar==0.1.18"]

@@ -1,0 +1,1 @@
+"""Persistent embedding stores."""
