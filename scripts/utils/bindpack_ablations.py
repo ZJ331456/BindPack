@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 import shutil
+import time
 import urllib.request
 from tqdm import tqdm
 
@@ -154,10 +155,6 @@ def online_case(args, context, indices, output, name, mode, source=None, fractio
                 read_json(case / 'request_ledger.json')['summary'].get('complete') is not True):
             raise ValueError('Validated request ledger changed or is incomplete')
         return wf.verify_artifacts(case)
-    if execution_receipt is None:
-        wf.initialize_case(context, case)
-        write_json(case / 'manifest.json', manifest)
-        write_json(case / 'selected_indices.json', indices)
     flags = tuple(f for f in wf.FLAGS if mode != 'no_plan_prune' or f != 'plan_prune')
     command = wf.command(args, context, case, indices, flags)
     command[command.index(str(ROOT / 'scripts/eval_dataset.py'))] = str(ROOT / 'scripts/ablation_worker.py')
@@ -169,6 +166,12 @@ def online_case(args, context, indices, output, name, mode, source=None, fractio
         'embedding_batch_size': 4, 'hop_source': manifest['benchmark_hop_policy'],
         'snapshot_source': str(source) if source else None}
     if execution_receipt is None:
+        if case.exists() and getattr(args, 'retry_failed', False):
+            prepare_failed_retry(context, case, manifest, protocol)
+        else:
+            wf.initialize_case(context, case)
+        write_json(case / 'manifest.json', manifest)
+        write_json(case / 'selected_indices.json', indices)
         write_json(case / 'experiment_protocol.json', protocol)
     elif read_json(case / 'experiment_protocol.json') != json.loads(json.dumps(protocol)):
         raise ValueError('Prepared case configuration changed')
@@ -191,6 +194,11 @@ def online_case(args, context, indices, output, name, mode, source=None, fractio
     if mode in ('qd', 'iterative'):
         report['wall_time_scope'] = 'incremental_control_after_replayed_common_base_plus_model_loading'
     report['request_cost'] = ledger['summary']
+    attempts = sorted((case / 'attempts').glob('*/retry_receipt.json'))
+    if attempts:
+        report['previous_failed_attempts'] = [read_json(path) for path in attempts]
+        report['cache_policy'] = 'Original frozen post-index clone, then warm retry of an incomplete run; logical tokens remain measured.'
+        report['wall_time_comparable_to_cold_runs'] = False
     report['evaluation_scope'] = 'development_queries_previously_used_for_method_selection'
     write_json(case / 'report.json', report)
     marker = read_json(case / 'validated.ok')
@@ -198,6 +206,28 @@ def online_case(args, context, indices, output, name, mode, source=None, fractio
     marker['ledger_sha256'] = assets.sha256(case / 'request_ledger.json')
     write_json(case / 'validated.ok', marker)
     return report
+
+
+def prepare_failed_retry(context, case, manifest, protocol):
+    """Retain valid inputs/cache and archive failure accounting before retry."""
+    if ((case / 'validated.ok').exists() or read_json(case / 'manifest.json') != manifest
+            or read_json(case / 'experiment_protocol.json') != json.loads(json.dumps(protocol))):
+        raise ValueError('Failed retry inputs/configuration differ')
+    expected = manifest['source_asset_sha256']
+    if (assets.asset_hashes(case / 'index', manifest['model_dir']) != expected
+            or assets.asset_hashes(context['source'], manifest['model_dir']) != expected):
+        raise ValueError('Refusing retry with changed private/public index')
+    attempt = case / 'attempts' / str(time.time_ns())
+    attempt.mkdir(parents=True)
+    for filename in ('request_ledger.json', 'run.log', 'before.json'):
+        if (case / filename).is_file():
+            shutil.copy2(case / filename, attempt / filename)
+    old_cost = read_json(case / 'request_ledger.json')['summary'] if (case / 'request_ledger.json').is_file() else None
+    write_json(attempt / 'retry_receipt.json', {'reason': 'retry_incomplete_run_after_observer_fix',
+        'warm_cache': True, 'prior_logical_request_cost': old_cost,
+        'cache_sha256_before_retry': assets.cache_hashes(case / 'index/llm_cache'),
+        'source_asset_sha256': expected})
+    LOG.info('[retry-incomplete] %s; saved failure diagnostics and reusing request cache', case)
 
 
 def online_conditions(capture, fractions):
@@ -313,6 +343,7 @@ def main():
     parser.add_argument('--datasets', nargs='+', choices=DATASETS, default=list(DATASETS))
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--full-after-smoke', action='store_true')
+    parser.add_argument('--retry-failed', action='store_true', help='Retry unchanged incomplete inputs using their request cache')
     parser.add_argument('--review-only', action='store_true')
     parser.add_argument('--budget-fractions', nargs='+', type=float, default=[0.5, 1.0])
     args = parser.parse_args()
@@ -332,7 +363,15 @@ def main():
     code_receipt['scripts/run_bindpack_ablations_nv2.sh'] = assets.sha256(ROOT / 'scripts/run_bindpack_ablations_nv2.sh')
     receipt_path = args.metadata / 'code_snapshot.json'
     if receipt_path.exists() and read_json(receipt_path) != code_receipt:
-        raise ValueError('Ablation code changed since this batch started; use a separate metadata batch')
+        previous = read_json(receipt_path)
+        changed = {name for name in previous.keys() | code_receipt.keys()
+                   if previous.get(name) != code_receipt.get(name)}
+        observer_files = {'src/bindpack/experiments/capture.py', 'scripts/utils/bindpack_ablations.py'}
+        if not args.retry_failed or not changed <= observer_files:
+            raise ValueError('Ablation code changed since this batch started; use a separate metadata batch')
+        write_json(args.metadata / f'observer_fix_{time.time_ns()}.json', {
+            'reason': 'review_request_ownership_and_failed_run_retry_only',
+            'changed_files': sorted(changed), 'previous': previous, 'current': code_receipt})
     write_json(receipt_path, code_receipt)
     output = root / '_bindpack_ablation_smoke/cases' if args.smoke else root / 'cases'
     args.embedding_model = '/root/models/NV-Embed-v2'

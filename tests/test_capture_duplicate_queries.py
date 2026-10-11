@@ -173,7 +173,9 @@ def stub(name, **values):
 stub(".retrieval.engine", BindPack=FakeBase)
 stub(".utils.misc_utils", QuerySolution=SimpleNamespace)
 stub(".evaluation.retrieval_eval", RetrievalRecall=FakeMetric)
-stub(".evidence.evidence_retrieval", EvidenceRetrieval=FakeEvidence)
+stub(".evidence.evidence_retrieval", EvidenceRetrieval=FakeEvidence,
+     branch_matches=lambda requirements, bindings: all(
+         bindings.get(key) == value for key, value in requirements.items()))
 SPEC = importlib.util.spec_from_file_location(PACKAGE.__name__ + ".experiments.online",
                                             ROOT / "src/bindpack/experiments/online.py")
 module = importlib.util.module_from_spec(SPEC)

@@ -13,6 +13,7 @@ import threading
 import numpy as np
 
 from ..evidence.evidence_retrieval import EvidenceRetrieval
+from ..evidence.verification import evidence_support_semantic_veto as support_review
 
 
 def json_value(value):
@@ -60,6 +61,8 @@ class CaptureSession:
         self.retrieval_counts = defaultdict(list)
         self.count_lock = threading.Lock()
         self.original_finalize = EvidenceRetrieval.finalize
+        self.original_review_fetch = support_review._fetch
+        self.review_fetch_hook = None
 
     def register_queries(self, queries):
         if len(set(queries)) != len(queries):
@@ -82,6 +85,58 @@ class CaptureSession:
             with self.ledger.scope(query, stage):
                 return original(*args, **kwargs)
         setattr(owner, name, observed)
+
+    def _install_review_scopes(self):
+        """Attribute review jobs from their actual task, inside each worker.
+
+        The review prompts serialize the question as JSON, so searching their
+        text cannot reliably recover quoted, escaped, or multiline questions.
+        Pass a transparent executor proxy to the original fetch implementation
+        instead; preflight, request arguments, responses, and worker limits are
+        all preserved.
+        """
+        session = self
+
+        @wraps(self.original_review_fetch)
+        def fetch(runtime, executor, contexts, stage):
+            if runtime is not session.rag.evidence_runtime:
+                return session.original_review_fetch(runtime, executor, contexts, stage)
+
+            class ScopedExecutor:
+                def __init__(self):
+                    self.submitted_contexts = set()
+
+                def __getattr__(self, name):
+                    return getattr(executor, name)
+
+                def submit(self, func, *args, **kwargs):
+                    if func is not support_review._request:
+                        return executor.submit(func, *args, **kwargs)
+                    messages = args[1] if len(args) > 1 else kwargs.get('messages')
+                    # _fetch has already recorded the exact preflight result
+                    # on the task before submitting this original request.
+                    match = next(((index, ctx) for index, ctx in enumerate(contexts)
+                                  if index not in self.submitted_contexts
+                                  and ctx.get(stage + '_messages') is messages
+                                  and ctx.get(stage + '_preflight', {}).get('allowed')), None)
+                    if match is None:
+                        raise ValueError('Review request lost its actual task context')
+                    index, ctx = match
+                    self.submitted_contexts.add(index)
+                    query = ctx['solution'].question
+
+                    def execute():
+                        # ContextVars do not propagate into pool threads. The
+                        # session ledger can change between duplicate batches,
+                        # so read the current ledger when the worker executes.
+                        with session.ledger.scope(query, stage):
+                            return func(*args, **kwargs)
+                    return executor.submit(execute)
+
+            return session.original_review_fetch(runtime, ScopedExecutor(), contexts, stage)
+
+        self.review_fetch_hook = fetch
+        support_review._fetch = fetch
 
     def install(self):
         self.ledger.resolver = self.resolve_messages
@@ -146,6 +201,7 @@ class CaptureSession:
                     observed.append((func, args))
             return original_jobs(executor, observed)
         runtime._collect_jobs = jobs
+        self._install_review_scopes()
         session = self
 
         def finalize(instance, query, ids, scores, ctx, state):
@@ -184,6 +240,8 @@ class CaptureSession:
 
     def close(self):
         EvidenceRetrieval.finalize = self.original_finalize
+        if support_review._fetch is self.review_fetch_hook:
+            support_review._fetch = self.original_review_fetch
         for entry in self.saved:
             with gzip.open(self.directory / entry['file'], 'rb') as stream:
                 entry['input_sha256'] = hashlib.sha256(stream.read()).hexdigest()

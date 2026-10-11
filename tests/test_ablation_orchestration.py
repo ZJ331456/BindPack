@@ -171,6 +171,60 @@ class AblationOrchestrationTests(unittest.TestCase):
                 driver.online_case(self.args, self.context, indices, self.output,
                     "abla_budget_qd_100", "qd", self.source, fraction)
 
+    def test_unchanged_failed_retry_keeps_cache_and_archives_failure_accounting(self):
+        case = self.prepare(name="retry_unchanged", mode="capture", complete=False)
+        cache = case / "index/llm_cache/qwen3-8b_cache.sqlite"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(b"private request cache from failed attempt\x00\x01")
+        (case / "run.log").write_text("original failed-attempt log\n")
+        preserved = {name: (case / name).read_bytes()
+                     for name in ("request_ledger.json", "run.log", "before.json")}
+        cache_bytes, cache_hash = cache.read_bytes(), driver.assets.sha256(cache)
+        manifest = driver.read_json(case / "manifest.json")
+        protocol = driver.read_json(case / "experiment_protocol.json")
+
+        driver.prepare_failed_retry(self.context, case, manifest, protocol)
+
+        attempts = list((case / "attempts").iterdir())
+        self.assertEqual(len(attempts), 1)
+        archive = attempts[0]
+        for name, original in preserved.items():
+            self.assertEqual((archive / name).read_bytes(), original)
+            self.assertEqual((case / name).read_bytes(), original)
+        self.assertEqual(cache.read_bytes(), cache_bytes)
+        receipt = driver.read_json(archive / "retry_receipt.json")
+        self.assertTrue(receipt["warm_cache"])
+        self.assertEqual(receipt["reason"], "retry_incomplete_run_after_observer_fix")
+        self.assertFalse(receipt["prior_logical_request_cost"]["complete"])
+        self.assertEqual(receipt["cache_sha256_before_retry"], {cache.name: cache_hash})
+        self.assertEqual(receipt["source_asset_sha256"], self.asset_hashes)
+        self.assertFalse((case / "validated.ok").exists())
+
+    def test_failed_retry_rejects_input_protocol_and_private_or_public_asset_drift(self):
+        for drift in ("manifest", "protocol", "private_index", "public_index"):
+            with self.subTest(drift=drift):
+                case = self.prepare(name="retry_changed_" + drift, mode="capture", complete=False)
+                manifest = driver.read_json(case / "manifest.json")
+                protocol = driver.read_json(case / "experiment_protocol.json")
+                if drift == "manifest":
+                    manifest["selected_indices"] = list(reversed(self.indices))
+                elif drift == "protocol":
+                    protocol["llm_concurrency"] = 4
+                changed_hashes = dict(self.asset_hashes)
+                changed_hashes[next(iter(changed_hashes))] = "modified-index-asset"
+
+                def hashes(index, model_dir=None):
+                    changed = ((drift == "private_index" and Path(index) == case / "index") or
+                               (drift == "public_index" and Path(index) == self.context["source"]))
+                    return changed_hashes if changed else self.asset_hashes
+
+                with patch.object(driver.assets, "asset_hashes", side_effect=hashes):
+                    with self.assertRaisesRegex(ValueError, "differ|changed private/public index"):
+                        driver.prepare_failed_retry(self.context, case, manifest, protocol)
+                self.assertFalse((case / "attempts").exists())
+                self.assertFalse((case / "validated.ok").exists())
+                self.assertTrue((case / "request_ledger.json").is_file())
+
     def frozen(self, expected_ids=None):
         directory = self.source / "snapshots"
         directory.mkdir(parents=True)
