@@ -22,6 +22,8 @@ import urllib.request
 
 from eval_utils import (build_docs_from_full_corpus, build_docs_from_samples,
                         get_benchmark_hops, get_gold_docs)
+from report_metrics import write_metric_report
+from utils.reporting_protocol import persist_reporting_receipt, resolve_existing_protocol
 
 ROOT = Path(__file__).resolve().parents[2]
 CASES = ("full", "wo_route", "wo_plan", "wo_pack")
@@ -379,6 +381,24 @@ def selected_cases(config):
     return list(CASES) + ([HIPPO_CASE] if config.get("include_hipporag") else [])
 
 
+def save_metrics_report(case, identity, metadata):
+    """Postprocess validated outputs without rerunning retrieval on failure."""
+    failure = case / "report_error.json"
+    try:
+        report = write_metric_report(case / "result.json", data_path=identity["data_path"],
+                                     manifest_path=metadata / "sample_manifest.json")
+        failure.unlink(missing_ok=True)
+        return report
+    except Exception as exc:
+        LOG.exception("Validated result retained; metric reporting failed for %s", case)
+        try:
+            write_json(failure, {"status": "error", "postprocessing_only": True,
+                                "result": str(case / "result.json"), "error": str(exc)})
+        except OSError:
+            LOG.exception("Could not persist the metric-report error receipt for %s", case)
+        return None
+
+
 def run_dataset(config, context, output, env):
     identity, index, runtime = context["identity"], context["index"], config["runtime"]
     metadata = context["metadata"]
@@ -461,9 +481,12 @@ def run_dataset(config, context, output, env):
                      identity["dataset"], stage, seconds, reused)
         if index_hashes(index, runtime) != receipt["assets"]:
             raise ValueError(f"Evaluation altered frozen shared index: {index}")
+        metric_report = save_metrics_report(case, identity, metadata)
         reports.append({"dataset": identity["dataset"], "stage_ablation": stage,
                         "samples": len(identity["selected_indices"]), "result": str(case / "result.json"),
                         "retrieval_metrics": result["retrieval_metrics"], "qa_metrics": result["qa_metrics"],
+                        "metrics_report": str(case / "report.json") if metric_report else None,
+                        "evidence_metrics": metric_report["metrics"] if metric_report else None,
                         "llm_request_stats": result.get("llm_request_stats", {}),
                         "seconds": read_json(marker)["seconds"]})
     return reports
@@ -570,9 +593,14 @@ def main(argv=None):
         protocol["shared_indexes"] = [context["source_receipt"] for context in contexts]
         protocol["index_policy"] = "source read only; private copy per case, released after validation; independent LLM caches"
     protocol_path = batch / "protocol.json"
+    reporting_receipt = None
     if protocol_path.exists():
-        if read_json(protocol_path) != protocol:
-            raise ValueError("Existing inputs/configuration/code differ; choose a new --out-root")
+        try:
+            protocol, reporting_receipt = resolve_existing_protocol(protocol_path, protocol, root=ROOT)
+        except ValueError as exc:
+            raise ValueError(f"Existing inputs/configuration/code differ; choose a new --out-root: {exc}") from exc
+        if reporting_receipt is not None:
+            LOG.info("Verified reporting-only update; original retrieval protocol retained")
         if not args.resume and not args.dry_run:
             raise ValueError("Output already exists; use --resume to validate and continue")
     elif batch.exists() and any(batch.iterdir()):
@@ -607,7 +635,10 @@ def main(argv=None):
         if snapshot.exists() and snapshot.read_bytes() != method_bytes:
             raise ValueError(f"Frozen method configuration changed: {snapshot}")
         snapshot.write_bytes(method_bytes)
-        write_json(protocol_path, protocol)
+        if not protocol_path.exists():
+            write_json(protocol_path, protocol)
+        if reporting_receipt is not None:
+            persist_reporting_receipt(protocol_path, reporting_receipt)
         reports = []
         for context in contexts:
             reports.extend(run_dataset(config, context, output, env))

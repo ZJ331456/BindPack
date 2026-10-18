@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "kind": "evaluation_reporting_only",
+  "base_commit": "789ecaa4e8e1fcb69bdd9aca8dde0b6e3b9fc87e",
+  "base_code_sha256": "22d90568a97e181bb612dd8ca7032d1f727da3c092562ada5a0266a2d46be5f4",
+  "changes": {
+    "scripts/eval_dataset.py": {
+      "before": "95b85feabdd15d4e865fd9ff2c5da174c28beb0dc3546c87b0b176ff7e9dba88",
+      "after": "51ef71b13846b8ec74edc8ed393f3608c668fa0f4c6602fbc3422be9e7527e09"
+    },
+    "scripts/utils/stage_ablations.py": {
+      "before": "7d9a4b2ceb676508430068e7ffbe0c4f291a8b3ddd61981e11712f4cd60f4106",
+      "after": "840a3c0b692607aafa456b33dd1cee0f44113b07f7b054ef65e8419d5ef4c8ae"
+    }
+  },
+  "added": {
+    "src/bindpack/evaluation/gold_graph.py": "bb9e57216a28f4f35606ae5a516fb430f4a5fbfbaa10d80280879bf9925556b8",
+    "src/bindpack/evaluation/structural_metrics.py": "351664c4e6c1b048c639f52c71998f9441186b4699a964e0ae0b386fb50a873c",
+    "src/bindpack/evaluation/metric_report.py": "3862b854861c7488feca2514e3d2737b5e4ef5f20dc00773ac63ae05014c0dd3",
+    "scripts/report_metrics.py": "ce268453ddcc15920d13b8339e3fab53403e606779b1382e0a58b76475b871b4",
+    "scripts/utils/reporting_protocol.py": "b6f429a5c8dd5a738b27a69fafed3aed54204f8de7b352de239a704abc19b5b7"
+  }
+}

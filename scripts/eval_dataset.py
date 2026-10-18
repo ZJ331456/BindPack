@@ -311,6 +311,22 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
             indent=2,
         )
 
+    # Measurement runs only after the model output has been persisted. A report
+    # failure can be retried offline and must not discard an expensive run.
+    report_error = Path(out_path).with_name("report_error.json")
+    try:
+        from bindpack.evaluation.metric_report import write_metric_report
+        write_metric_report(out_path, data_path=data_path, require_validated=False)
+        report_error.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.exception("Results saved; metric reporting failed. Retry with scripts/report_metrics.py")
+        try:
+            report_error.write_text(json.dumps({"status": "error", "postprocessing_only": True,
+                "result": str(out_path), "error": str(exc)}, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8")
+        except OSError:
+            logger.exception("Could not persist the metric-report error receipt")
+
     logger.info("[4/4] Done. Results saved to: %s", out_path)
     return out_path
 

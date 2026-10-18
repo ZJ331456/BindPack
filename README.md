@@ -42,6 +42,14 @@ rag = BindPack(config=cfg)
 tail -f /root/BindPack/outputs/3multi_hop_datasets_results_10_5/logs/run_bindpack_four_cases_reuse.log
 ```
 
+每组另存 `report.json` 汇总指标和 `metrics_details.json` 逐题诊断，包含 FCR 与基于独立 gold DAG 的 DCC。已有最终排名可离线补算，无需重跑：
+
+```bash
+python scripts/report_metrics.py --cases-root outputs/3multi_hop_datasets_results_10_5/cases
+```
+
+MuSiQue 可计算 DCC；HotpotQA/2Wiki 缺少可信 gold DAG 时为 `null` 并注明原因。定义、来源与自动补算见 [指标说明](docs/新指标说明.md)。
+
 - [四组实验运行与服务准备](docs/四组实验-Qwen3.md)
 - [源码结构与配置](src/bindpack/README.md)
 - [模块机制、消融定义与边界](docs/模块组合-消融说明.md)

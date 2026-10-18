@@ -58,6 +58,17 @@ class StageAblationRunnerTests(unittest.TestCase):
         output = Path(values["output"])
         model = directory / runner.model_dir(self.config["runtime"])
         indices = runner.read_json(values["sample_indices_file"])
+        samples = runner.read_json(self.data)
+        exported_rows = []
+        for number in indices:
+            sample = samples[number]
+            gold = runner.get_gold_docs([sample], "hotpotqa")[0]
+            exported_rows.append({"query_index": number, "sample_id": sample["_id"],
+                "question": sample["question"], "answer": sample["answer"],
+                "gold_answers": [sample["answer"]], "gold_docs": gold,
+                "docs": gold, "candidate_docs": gold,
+                "gold_document_ranks": [{"doc": doc, "rank": rank}
+                                        for rank, doc in enumerate(gold, 1)]})
         hippo = str(argv[3]).endswith("HippoRAG/main.py")
         if "--index_only" in argv:
             method = {"sha256": runner.sha256(values["method_config"]),
@@ -81,7 +92,7 @@ class StageAblationRunnerTests(unittest.TestCase):
                 "selected_indices": indices, "sample_size_effective": len(indices),
                 "eval_mode": values["eval_mode"], "retrieval_metrics": {"Recall@1": .4, "Recall@5": .9, "Recall@10": .95},
                 "qa_metrics": {"ExactMatch": .5, "F1": .5} if values["eval_mode"] == "rag_qa" else {},
-                "results": [{"query_index": index, "sample_id": "question-1"} for index in indices]})
+                "results": exported_rows})
         else:
             method = {"sha256": runner.sha256(values["method_config"]),
                       "parameters": runner.read_json(values["method_config"])}
@@ -95,7 +106,7 @@ class StageAblationRunnerTests(unittest.TestCase):
                 "runtime_config": runtime, "method_config": method, "selected_indices": indices, "sample_size_effective": len(indices),
                 "eval_mode": values["eval_mode"], "retrieval_metrics": {"Recall@1": .5, "Recall@5": 1., "Recall@10": 1.},
                 "qa_metrics": {"ExactMatch": .5, "F1": .5} if values["eval_mode"] == "rag_qa" else {},
-                "results": [{"query_index": index, "sample_id": "question-1"} for index in indices]})
+                "results": exported_rows})
         cache = directory / "llm_cache/cache.json"
         owner = "builder" if "--index_only" in argv else ("hippporag2_reproduce" if hippo else values["stage_ablation"])
         runner.write_json(cache, {"owner": owner})
@@ -146,11 +157,33 @@ class StageAblationRunnerTests(unittest.TestCase):
         manifest = runner.read_json(self.output / "metadata/hotpotqa/sample_manifest.json")
         self.assertEqual(manifest["sample_ids"], ["question-1"])
         self.assertEqual(runner.read_json(self.output / "completed.ok")["validated_case_count"], 4)
+        for name in runner.CASES:
+            case = self.output / "cases/hotpotqa" / name
+            report = runner.read_json(case / "report.json")
+            self.assertEqual(report["metrics"]["FCR@5"], 1.0)
+            self.assertIsNone(report["metrics"]["DCC@5"])
+            self.assertEqual(report["inputs"]["result"]["sha256"],
+                             runner.read_json(case / "validated.ok")["result_sha256"])
         self.assertEqual(self.invoke(["--resume"]), 0)
         self.assertEqual(len(self.calls), 5, "validated resume must not run models again")
         caches = [runner.read_json(self.output / "cases/hotpotqa" / case / "index/llm_cache/cache.json")
                   for case in runner.CASES]
         self.assertEqual([cache["owner"] for cache in caches], list(runner.CASES))
+
+    def test_report_failure_is_retried_offline_without_rerunning_validated_cases(self):
+        with patch.object(runner, "write_metric_report", side_effect=OSError("report storage unavailable")), \
+                self.assertLogs(runner.LOG, level="ERROR"):
+            self.assertEqual(self.invoke(), 0)
+        for name in runner.CASES:
+            case = self.output / "cases/hotpotqa" / name
+            self.assertTrue((case / "validated.ok").is_file())
+            self.assertTrue(runner.read_json(case / "report_error.json")["postprocessing_only"])
+        self.assertEqual(self.invoke(["--resume"]), 0)
+        self.assertEqual(len(self.calls), 5)
+        for name in runner.CASES:
+            case = self.output / "cases/hotpotqa" / name
+            self.assertTrue((case / "report.json").is_file())
+            self.assertFalse((case / "report_error.json").exists())
 
     def test_dry_run_is_read_only_and_never_contacts_service(self):
         with patch.object(runner, "execute") as execute, patch.object(runner, "check_service") as service, \

@@ -291,3 +291,9 @@ tail -f /root/BindPack/outputs/3multi_hop_datasets_results_10_5/cases/hotpotqa/f
 
 第二轮源码快照的 CPU、冻结 Full、真实模型四组与 resume 结果见 [2026-10-18 验证报告](三阶段重构验证_2026-10-18.md)。
 当前复用入口与额外方法的验证范围见 [最终检查说明](项目最终检查_2026-10-18.md)。
+
+## FCR、DCC 与独立指标报告
+
+每个评测结果目录另存 `report.json`（指标汇总、分母、来源）和 `metrics_details.json`（逐题诊断）。默认 K=5/10/20/200，不改变检索与 reader。MuSiQue 的 DCC 使用原生 gold decomposition；HotpotQA/2Wiki 缺少可信依赖图时为 `null`，不能用预测 plan 代替。
+
+已有结果无需重跑，可执行 `python scripts/report_metrics.py --cases-root outputs/3multi_hop_datasets_results_10_5/cases`。当前已经运行的旧父进程由独立 CPU watcher 补报告；后续入口在保存和校验后自动报告。报告异常不丢弃检索结果，可单独重试。完整定义、命令及不改写原协议的报告更新校验见 [新指标说明](新指标说明.md)。
