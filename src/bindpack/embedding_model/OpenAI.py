@@ -12,7 +12,7 @@ from transformers import AutoModel
 from openai import OpenAI
 from openai import AzureOpenAI
 
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..utils.logging_utils import get_logger
 from .base import BaseEmbeddingModel, EmbeddingConfig, make_cache_embed
 
@@ -61,7 +61,7 @@ def _extract_context_limit(error: Exception) -> Optional[int]:
 
 class OpenAIEmbeddingModel(BaseEmbeddingModel):
 
-    def __init__(self, global_config: Optional[BaseConfig] = None, embedding_model_name: Optional[str] = None) -> None:
+    def __init__(self, global_config: Optional[RuntimeConfig] = None, embedding_model_name: Optional[str] = None) -> None:
         super().__init__(global_config=global_config)
 
         if embedding_model_name is not None:
@@ -70,7 +70,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
                 f"Overriding {self.__class__.__name__}'s embedding_model_name with: {self.embedding_model_name}")
 
         self._init_embedding_config()
-        self.embedding_max_input_tokens = _safe_env_int("HIPPO_EMBEDDING_MAX_INPUT_TOKENS", 0)
+        self.embedding_max_input_tokens = _safe_env_int("BINDPACK_EMBEDDING_MAX_INPUT_TOKENS", 0)
         self._token_encoder = None
         self._token_encoder_loaded = False
         self._truncation_warning_count = 0
@@ -79,13 +79,13 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
         logger.debug(
             f"Initializing {self.__class__.__name__}'s embedding model with params: {self.embedding_config.model_init_params}")
 
-        connect_timeout = _safe_env_float("HIPPO_HTTP_CONNECT_TIMEOUT_SEC", 20.0)
-        read_timeout = _safe_env_float("HIPPO_HTTP_READ_TIMEOUT_SEC", 300.0)
-        write_timeout = _safe_env_float("HIPPO_HTTP_WRITE_TIMEOUT_SEC", read_timeout)
-        pool_timeout = _safe_env_float("HIPPO_HTTP_POOL_TIMEOUT_SEC", 30.0)
-        max_retries = _safe_env_int("HIPPO_OPENAI_MAX_RETRIES", 2)
-        max_connections = _safe_env_int("HIPPO_HTTP_MAX_CONNECTIONS", 500)
-        max_keepalive = min(_safe_env_int("HIPPO_HTTP_MAX_KEEPALIVE", 100), max_connections)
+        connect_timeout = _safe_env_float("BINDPACK_HTTP_CONNECT_TIMEOUT_SEC", 20.0)
+        read_timeout = _safe_env_float("BINDPACK_HTTP_READ_TIMEOUT_SEC", 300.0)
+        write_timeout = _safe_env_float("BINDPACK_HTTP_WRITE_TIMEOUT_SEC", read_timeout)
+        pool_timeout = _safe_env_float("BINDPACK_HTTP_POOL_TIMEOUT_SEC", 30.0)
+        max_retries = _safe_env_int("BINDPACK_OPENAI_MAX_RETRIES", 2)
+        max_connections = _safe_env_int("BINDPACK_HTTP_MAX_CONNECTIONS", 500)
+        max_keepalive = min(_safe_env_int("BINDPACK_HTTP_MAX_KEEPALIVE", 100), max_connections)
         http_client = httpx.Client(
             limits=httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive),
             timeout=httpx.Timeout(
@@ -146,7 +146,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
         if self._token_encoder_loaded:
             return self._token_encoder
         self._token_encoder_loaded = True
-        encoding_name = os.environ.get("HIPPO_EMBEDDING_TIKTOKEN_ENCODING", "cl100k_base")
+        encoding_name = os.environ.get("BINDPACK_EMBEDDING_TIKTOKEN_ENCODING", "cl100k_base")
         try:
             import tiktoken
             self._token_encoder = tiktoken.get_encoding(encoding_name)
@@ -177,7 +177,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
                     truncated += 1
                 output.append(text)
         else:
-            char_limit = _safe_env_int("HIPPO_EMBEDDING_MAX_INPUT_CHARS", max(1, token_limit * 3))
+            char_limit = _safe_env_int("BINDPACK_EMBEDDING_MAX_INPUT_CHARS", max(1, token_limit * 3))
             output = []
             for text in texts:
                 if len(text) > char_limit:
@@ -253,7 +253,7 @@ class OpenAIEmbeddingModel(BaseEmbeddingModel):
         else:
             pbar = tqdm(total=len(texts), desc="Batch Encoding")
             results = []
-            max_attempts = _safe_env_int("HIPPO_EMBED_BATCH_RETRIES", 3)
+            max_attempts = _safe_env_int("BINDPACK_EMBED_BATCH_RETRIES", 3)
             for i in range(0, len(texts), batch_size):
                 batch = texts[i:i + batch_size]
                 last_error = None

@@ -2,7 +2,7 @@ from typing import Optional
 
 from transformers import AutoModel
 
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..utils.logging_utils import get_logger
 from .base import BaseEmbeddingModel, EmbeddingConfig
 from .nvembed_runtime import memory_bounded_batch_encode
@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 class NVEmbedV2EmbeddingModel(BaseEmbeddingModel):
     query_instruction_mode = "distinct"
 
-    def __init__(self, global_config: Optional[BaseConfig] = None, embedding_model_name: Optional[str] = None) -> None:
+    def __init__(self, global_config: Optional[RuntimeConfig] = None, embedding_model_name: Optional[str] = None) -> None:
         super().__init__(global_config=global_config)
 
         if embedding_model_name is not None:

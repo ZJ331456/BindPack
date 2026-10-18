@@ -1,51 +1,49 @@
 # BindPack 源码导航
 
-## 按职责阅读
-
-| 目录 | 职责 | 首先阅读 |
-| --- | --- | --- |
-| `index/` | NER、OpenIE、图构建、检查点、索引发布与实体缓存 | `shared_index_builder.py`、`graph_index.py`、`artifacts.py` |
-| `retrieval/` | 查询预取、跳数、图检索、QD/PCQD、排序与结果编排 | `engine.py`、`path_optimizer.py` |
-| `evidence/` | 子目标依赖执行、来源绑定、证据包选择和结果核验 | `README.md` |
-| `core/` | 公共运行时初始化、HippoRAG 风格检索与 QA 原语 | `base.py` |
-| `storage/` | 持久化向量与文本存储 | `embedding_store.py` |
-| `embedding_model/`、`llm/` | 模型适配、请求缓存与并发控制 | 对应模型适配器 |
-| `prompts/` | 索引及公共任务提示词 | `templates/` |
-| `evaluation/` | Recall、QA 指标和逐题导出 | `result_export.py` |
-| `utils/` | 共用配置、文本、日志及类型工具 | `config_utils.py` |
-
-`config.py` 定义算法配置。包顶层保持 `from bindpack import BindPack, BindPackConfig`。
-
-## 当前正式算法
-
-正式 runner 使用 stage 4，并启用：
+公开入口只有 `from bindpack import BindPack, BindPackConfig`；用 `BindPack(config=cfg)` 创建检索器，运行配置为 `rag.config`。旧模块包装、类名别名、历史 flags 和实验 API 已移除。
 
 ```text
-planning,plan_prune,dag_package,support_semantic_veto
+bindpack/
+├── config.py                  BindPackConfig 配置组合与读取
+├── configuration/
+│   ├── defaults.json          runtime/candidates/route/plan/pack 默认数值唯一来源
+│   └── *.py                   各组 schema、类型与范围校验
+├── retrieval/engine.py        Route 窗口调度与在线检索
+├── pipeline.py                共享候选、Plan/Pack 显式组合
+├── stages/
+│   ├── route/                 seeds、bridge、iterative、QD/PCQD、path-set
+│   ├── plan/                  structure、planner、canonicalizer、validator、executor、binder、verifier
+│   └── pack/                  scorer、coverage、redundancy、DAG package、final safeguard
+├── utils/evidence.py          共享文本与来源分支工具
+├── index/                     图/向量/OpenIE 索引、IDF 与 bridge cache
+├── core/                      模型初始化、dense retrieval 与 reader
+├── storage/                   向量/文本存储
+├── embedding_model/、llm/     模型适配与请求缓存
+└── evaluation/                检索与 QA 指标
 ```
 
-`BindPackConfig()` 默认就是上述完整方法，并开启原有 PCQD、迭代检索和路径优化。
-正式脚本还会固定模型、语料、并发与预算。仅修改方法名称不等于相同实验条件。
-历史 stage、恢复类扩展和未使用的评分/选择实验已删除。
+Plan 使用初始 base 和 QD/PCQD 的独立 DPR 候选，在最终 Route fusion/path-set 以前执行；Pack 结合最终 Route 排名和 Plan state。目录整理保留这条原 Full 执行关系。
 
-调用关系：
+`EvidencePipeline` 组合 `PlanStage`、`PackStage`；Plan 显式组合 planner/executor/verifier，Pack 组合 scorer/coverage/DAG selector。算法不再依靠旧 EvidenceRetrieval/Mixin 多层继承。
 
-```text
-BindPack（retrieval/engine.py）
-  ├─ IndexArtifactsMixin → 实体 IDF / bridge 缓存
-  ├─ BaseRAG → GraphIndexMixin → NER / OpenIE / 图与检查点
-  └─ ImprovedEvidenceRetrieval（Planner → DAGPackage → EvidenceRetrieval）
-       → 依赖规划与绑定 → 候选检索 → 证据包选择 → 支撑保护与语义否决
+默认模型为 Qwen3-8B + Qwen3-Embedding-8B。嵌套参数通过 `cfg.candidates`、`cfg.route`、`cfg.plan`、`cfg.pack` 访问；默认值只存于 `configuration/defaults.json`。`configs/ablations_qwen3.json` 管理资源与实验编排，并引用方法参数文件。
+
+```python
+from bindpack import BindPack, BindPackConfig
+
+cfg = BindPackConfig.from_file(stage_ablation="full", save_dir="outputs/my_run/index")
+rag = BindPack(config=cfg)
 ```
 
-索引方法从旧类移入 mixin，原方法正文保持一致，`super()` 次序保留原来的覆盖关系。
-索引文件名、已有向量/图结构和 `QuerySolution` 位置保持兼容。
+| 模式 | 行为 |
+| --- | --- |
+| `full` | 完整三阶段和最终 safeguard |
+| `wo_route` | 基础图候选适配器，移除增强 Route；保留 Plan/Pack |
+| `wo_plan` | 不生成/执行依赖 DAG、绑定或 proof；Route + flat coverage/redundancy Pack |
+| `wo_pack` | Route/Plan 保持，仅 base/goal pointwise；无 greedy、DAG 和 final safeguard |
 
-## 保留的兼容入口
+`wo_route` 不是外部 HippoRAG2 的独立复现，`wo_plan` 不具有完整 DAG Pack。Qwen embedding 使用独立新索引。`retrieve` 只有检索指标，`rag_qa` 才有 reader QA 指标。
 
-根目录的 `BaseRAG.py`、`bindpack.py`、`embedding_store.py`、`rerank.py` 仅重导出
-原有公开类，实际实现只保留一份。顶层 `PathCondRAG` / `PCRAG` 及配置别名仍可用。
-内部证据模块按新目录引用；不为每个旧内部路径复制一个包装文件。
+完整机制与边界见 [模块说明](../../docs/模块组合-消融说明.md)，运行方法见 [四组实验](../../docs/四组实验-Qwen3.md)。
 
-当前仅保留完整方法及其实际调用的工具；现有四个组件可按 flags 关闭。
-完整清单及验证见 [最终方法精简说明](../../docs/最终全量方法代码精简_2026-10-11.md)。
+本轮验证见 [第二轮重构验证（2026-10-18）](../../docs/三阶段重构验证_2026-10-18.md)。

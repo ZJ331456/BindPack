@@ -40,13 +40,13 @@ VALIDATION_MODES = ('source_verified', 'structural')
 LOG = logging.getLogger(__name__)
 
 
-def quality_profile(*, strict=True, prompt_version='optimized', legacy=False,
+def quality_profile(*, strict=True, prompt_version='optimized',
                     validation_mode='source_verified'):
     """Identity of the extra extraction contract, independent of native config."""
     digest = lambda value: hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True).encode('utf-8')
     ).hexdigest()
-    prompt_version = 'origin' if legacy else resolve_prompt_version(prompt_version)
+    prompt_version = resolve_prompt_version(prompt_version)
     if prompt_version == 'origin':
         from ..prompts.templates.origin_triple_extraction_prompt import prompt_template as selected_triples
         from ..prompts.templates.origin_ner_prompt import prompt_template as selected_ner
@@ -61,8 +61,6 @@ def quality_profile(*, strict=True, prompt_version='optimized', legacy=False,
     if validation_mode not in VALIDATION_MODES:
         raise ValueError(f'Unknown OpenIE validation mode: {validation_mode}')
     if validation_mode == 'structural':
-        if legacy:
-            raise ValueError('Structural extraction has no legacy semantic-verification profile.')
         from .openie_build_queue import QUEUE_VERSION
         from .ner.source_verified import NER_RECOVERY_VERSION
         return {
@@ -88,44 +86,43 @@ def quality_profile(*, strict=True, prompt_version='optimized', legacy=False,
             'native_identity_scope': 'baseline_configuration_compatibility',
         }
     result = {
-        'schema_version': 2 if legacy else 3,
-        'name': 'bindpack_openie_quality_v2' if legacy else QUALITY_SCHEMA,
+        'schema_version': 3,
+        'name': QUALITY_SCHEMA,
         'prompt_schema': 'bindpack_source_grounded_triples_v2',
         'prompt_sha256': digest(serialize(selected_triples)),
         'triple_json_schema_sha256': digest(TRIPLE_JSON_SCHEMA),
         # Stable producer label shared with existing index manifests.
         'extractor': 'bindpack.information_extraction.source_verified_openie.SourceVerifiedOpenIE',
         'validation': 'three_nonempty_unicode_strings_v2',
-        'recovery': 'source_grounded_feedback_and_windows_v2' if legacy else 'whole_context_source_units_v3',
+        'recovery': 'whole_context_source_units_v3',
         'fresh_recovery': RECOVERY_VERSION,
-        'fresh_recovery_semantic_verifier': 'bindpack_source_only_entailment_v1' if legacy else VERIFIER_VERSION,
-        'semantic_scope': 'fresh_recovered_and_empty_only' if legacy else 'all_final_relations',
+        'fresh_recovery_semantic_verifier': VERIFIER_VERSION,
+        'semantic_scope': 'all_final_relations',
         'failure_policy': STRICT_FAILURE_POLICY,
         'ner_max_tokens': 512,
         'triple_max_tokens': 2048,
         'native_identity_scope': 'baseline_configuration_compatibility',
     }
-    if not legacy:
-        from .ner.source_verified import NER_RECOVERY_VERSION
-        result.update(prompt_version=prompt_version,
-                      ner_prompt_sha256=digest(serialize(selected_ner)),
-                      structured_initial_triples=True,
-                      ner_recovery=NER_RECOVERY_VERSION,
-                      retry_feedback='attempt_scoped_v1')
-        from .openie import openie_source_evidence as evidence
-        from .openie import openie_atomic_recovery as atomic
-        from .openie_build_queue import QUEUE_VERSION
-        from .openie.openie_structured_output import STRUCTURED_OUTPUT_VERSION
-        result.update(source_verified_schema=SOURCE_VERIFIED_VERSION, atomic_recovery=atomic.ATOMIC_RECOVERY_VERSION,
-                      pending_queue=QUEUE_VERSION, stage_checkpoint='sqlite_per_stage_v1')
-        result.update(evidence_implementation=evidence.EVIDENCE_IMPLEMENTATION,
-                      atomic_implementation=atomic.ATOMIC_RECOVERY_IMPLEMENTATION,
-                      structured_output=STRUCTURED_OUTPUT_VERSION,
-                      evidence_prompt_sha256=digest(evidence.SYSTEM),
-                      atomic_prompt_sha256=digest(atomic.SYSTEM),
-                      atomic_schema_sha256=digest(atomic.SCHEMA))
-        if not strict:
-            result.update(openie_strict=False, failure_policy=LENIENT_FAILURE_POLICY)
+    from .ner.source_verified import NER_RECOVERY_VERSION
+    result.update(prompt_version=prompt_version,
+                  ner_prompt_sha256=digest(serialize(selected_ner)),
+                  structured_initial_triples=True,
+                  ner_recovery=NER_RECOVERY_VERSION,
+                  retry_feedback='attempt_scoped_v1')
+    from .openie import openie_source_evidence as evidence
+    from .openie import openie_atomic_recovery as atomic
+    from .openie_build_queue import QUEUE_VERSION
+    from .openie.openie_structured_output import STRUCTURED_OUTPUT_VERSION
+    result.update(source_verified_schema=SOURCE_VERIFIED_VERSION, atomic_recovery=atomic.ATOMIC_RECOVERY_VERSION,
+                  pending_queue=QUEUE_VERSION, stage_checkpoint='sqlite_per_stage_v1')
+    result.update(evidence_implementation=evidence.EVIDENCE_IMPLEMENTATION,
+                  atomic_implementation=atomic.ATOMIC_RECOVERY_IMPLEMENTATION,
+                  structured_output=STRUCTURED_OUTPUT_VERSION,
+                  evidence_prompt_sha256=digest(evidence.SYSTEM),
+                  atomic_prompt_sha256=digest(atomic.SYSTEM),
+                  atomic_schema_sha256=digest(atomic.SCHEMA))
+    if not strict:
+        result.update(openie_strict=False, failure_policy=LENIENT_FAILURE_POLICY)
     return result
 
 
@@ -171,8 +168,8 @@ def quality_hipporag_class(native_class, *, openie_strict=True, prompt_version='
     """Create a runtime adapter without changing files in the baseline repo."""
 
     class QualitySharedHippoRAG(native_class):
-        def _quality_profile(self, *, legacy=False):
-            return quality_profile(strict=openie_strict, prompt_version=prompt_version, legacy=legacy,
+        def _quality_profile(self):
+            return quality_profile(strict=openie_strict, prompt_version=prompt_version,
                                    validation_mode=validation_mode)
 
         def _prepare_openie_progress(self, rows, chunks):
@@ -187,54 +184,6 @@ def quality_hipporag_class(native_class, *, openie_strict=True, prompt_version='
             self._strict_openie_progress = progress
             return rows
 
-        def _openie_provenance_for_manifest(self):
-            if getattr(self, '_legacy_quality_manifest_probe', False):
-                provenance = copy.deepcopy(self._current_openie_provenance())
-                provenance['quality_profile'] = self._quality_profile(legacy=True)
-                return provenance
-            return super()._openie_provenance_for_manifest()
-
-        def _validate_or_create_index_manifest(self):
-            path = Path(self.index_manifest_path)
-            allowed = os.environ.get('HIPPO_ALLOW_INDEX_RESUME', '').strip().lower() in {'1', 'true', 'yes', 'on'}
-            if (validation_mode == 'source_verified' and allowed and path.is_file()
-                    and self.global_config.force_index_from_scratch
-                    and self.global_config.force_openie_from_scratch):
-                stored = json.loads(path.read_text())
-                old_profile = (stored.get('openie') or {}).get('quality_profile')
-                if old_profile == self._quality_profile(legacy=True):
-                    source_path = next((Path(candidate) for candidate in (
-                        getattr(self, 'openie_state_path', None), getattr(self, 'openie_results_path', None))
-                        if candidate and Path(candidate).is_file()), None)
-                    if source_path is not None:
-                        source_state = json.loads(source_path.read_text())
-                        if source_state.get('docs') and source_state.get('provenance') != stored['openie']:
-                            raise RuntimeError('Quality upgrade refused: source provenance differs from the native manifest.')
-                    if (self.graph.vcount() or Path(self._graph_pickle_filename).exists()
-                            or self.entity_embedding_store.get_all_ids() or self.fact_embedding_store.get_all_ids()):
-                        raise RuntimeError('Quality upgrade requires an unpublished index without derived graph/entity/fact state.')
-                    # Let the real native validator build and compare every
-                    # embedding/component/graph/producer field. The sole
-                    # temporary difference is its quality-contract field.
-                    self._legacy_quality_manifest_probe = True
-                    fresh_openie = self.global_config.force_openie_from_scratch
-                    self.global_config.force_openie_from_scratch = False
-                    try:
-                        super()._validate_or_create_index_manifest()
-                    finally:
-                        self.global_config.force_openie_from_scratch = fresh_openie
-                        self._legacy_quality_manifest_probe = False
-                    current = copy.deepcopy(stored)
-                    current['openie'] = self._current_openie_provenance()
-                    backup = path.with_name('index_manifest.before_quality_upgrade.json')
-                    if not backup.exists():
-                        backup.write_text(json.dumps(stored, ensure_ascii=False, indent=2))
-                    temporary = path.with_suffix('.json.tmp')
-                    temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2))
-                    os.replace(temporary, path)
-                    LOG.info('Upgrading unpublished index to all-relation source evidence checks; existing extraction remains historical until re-audited.')
-            return super()._validate_or_create_index_manifest()
-
         def load_existing_openie(self, chunk_keys, force_reextract=False):
             """Resume only an explicitly authorized, unpublished checkpoint.
 
@@ -243,7 +192,7 @@ def quality_hipporag_class(native_class, *, openie_strict=True, prompt_version='
             native ``force_reextract`` would discard successful checkpoint
             rows. A failed row remains pending even though its ID is present.
             """
-            allowed = os.environ.get('HIPPO_ALLOW_INDEX_RESUME', '').strip().lower() in {
+            allowed = os.environ.get('BINDPACK_ALLOW_INDEX_RESUME', '').strip().lower() in {
                 '1', 'true', 'yes', 'on',
             }
             checkpoint = next((Path(path) for path in (
@@ -341,12 +290,12 @@ def quality_hipporag_class(native_class, *, openie_strict=True, prompt_version='
             return rows, pending
 
         def add_synonymy_edges(self, query_node_keys=None):
-            requested_device = os.environ.get('PATHCONDRAG_SHARED_KNN_DEVICE', '').strip().lower()
+            requested_device = os.environ.get('BINDPACK_KNN_DEVICE', '').strip().lower()
             if requested_device not in {'cpu', 'cuda'}:
                 return super().add_synonymy_edges(query_node_keys)
             import torch
             if requested_device == 'cuda' and not torch.cuda.is_available():
-                raise RuntimeError('PATHCONDRAG_SHARED_KNN_DEVICE=cuda requires an available CUDA device.')
+                raise RuntimeError('BINDPACK_KNN_DEVICE=cuda requires an available CUDA device.')
             # Native index() encodes all chunk/entity/fact vectors before this
             # call. A build-only entry can release the encoder while KNN uses
             # the already stored vectors; no subsequent encoding is performed.
@@ -361,12 +310,12 @@ def quality_hipporag_class(native_class, *, openie_strict=True, prompt_version='
             config = self.global_config
             previous_batches = (config.synonymy_edge_query_batch_size,
                                 config.synonymy_edge_key_batch_size)
-            previous_device = os.environ.get('HIPPORAG_KNN_DEVICE')
+            previous_device = os.environ.get('BINDPACK_KNN_DEVICE')
             previous_tf32 = torch.backends.cuda.matmul.allow_tf32
             if requested_device == 'cuda':
                 config.synonymy_edge_query_batch_size = 1000
                 config.synonymy_edge_key_batch_size = 16384
-            os.environ['HIPPORAG_KNN_DEVICE'] = requested_device
+            os.environ['BINDPACK_KNN_DEVICE'] = requested_device
             torch.backends.cuda.matmul.allow_tf32 = False
             self._shared_knn_execution = {
                 'device': requested_device, 'dtype': 'float32', 'allow_tf32': False,
@@ -393,9 +342,9 @@ def quality_hipporag_class(native_class, *, openie_strict=True, prompt_version='
                  config.synonymy_edge_key_batch_size) = previous_batches
                 torch.backends.cuda.matmul.allow_tf32 = previous_tf32
                 if previous_device is None:
-                    os.environ.pop('HIPPORAG_KNN_DEVICE', None)
+                    os.environ.pop('BINDPACK_KNN_DEVICE', None)
                 else:
-                    os.environ['HIPPORAG_KNN_DEVICE'] = previous_device
+                    os.environ['BINDPACK_KNN_DEVICE'] = previous_device
 
         def _current_openie_provenance(self):
             provenance = copy.deepcopy(super()._current_openie_provenance())
@@ -405,13 +354,7 @@ def quality_hipporag_class(native_class, *, openie_strict=True, prompt_version='
         def _validate_openie_provenance(self, provenance, source_path):
             validated = super()._validate_openie_provenance(provenance, source_path)
             profile = validated.get('quality_profile')
-            authorized_upgrade = (validation_mode == 'source_verified'
-                                  and os.environ.get('HIPPO_ALLOW_INDEX_RESUME', '').strip().lower()
-                                  in {'1', 'true', 'yes', 'on'}
-                                  and self.global_config.force_index_from_scratch
-                                  and self.global_config.force_openie_from_scratch
-                                  and profile == self._quality_profile(legacy=True))
-            if profile != self._quality_profile() and not authorized_upgrade:
+            if profile != self._quality_profile():
                 raise RuntimeError(f'OpenIE quality profile is incompatible: {source_path}')
             return validated
 
@@ -484,18 +427,18 @@ def run_shared_index_cli(argv=None, *, hippo_root=None):
     parser.add_argument('--openie_mode', default='online')
     parser.add_argument('--rag_type', default='hipporag')
     parser.add_argument('--embedding_name', default=os.environ.get(
-        'HIPPO_EMBEDDING_MODEL_NAME', 'nvidia/NV-Embed-v2'))
+        'BINDPACK_EMBEDDING_MODEL_NAME', 'nvidia/NV-Embed-v2'))
     parser.add_argument('--embedding_provider', default=None)
     parsed, _ = parser.parse_known_args(argv)
     if '--help' not in argv and '-h' not in argv:
         if parsed.eval_mode != 'index_only' or parsed.openie_mode != 'online' or parsed.rag_type != 'hipporag':
             raise ValueError('This entry requires --eval_mode index_only --openie_mode online --rag_type hipporag.')
     project_root = Path(__file__).resolve().parents[3]
-    baseline_root = Path(hippo_root or os.environ.get('HIPPO_ROOT')
+    baseline_root = Path(hippo_root or os.environ.get('BINDPACK_ROOT')
                          or project_root.parent / 'baseline' / 'HippoRAG').resolve()
     main_path = baseline_root / 'main.py'
     if not main_path.is_file():
-        raise FileNotFoundError(f'Baseline main.py not found: {main_path}; set HIPPO_ROOT.')
+        raise FileNotFoundError(f'Baseline main.py not found: {main_path}; set BINDPACK_ROOT.')
     previous_path, previous_argv = list(sys.path), list(sys.argv)
     previous_bytecode = sys.dont_write_bytecode
     module = None

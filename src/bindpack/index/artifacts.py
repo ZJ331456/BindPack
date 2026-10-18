@@ -19,8 +19,8 @@ class IndexArtifactsMixin:
                       retry_failed_openie=retry_failed_openie)
 
         if not (
-            self.pcrag_config.use_entity_idf_index
-            or self.pcrag_config.use_bridge_cache_index
+            self.config.route.index.entity_idf
+            or self.config.route.index.bridge_cache
         ):
             return
 
@@ -32,7 +32,7 @@ class IndexArtifactsMixin:
 
     def _build_index_side_artifacts(self):
         if self.ent_node_to_chunk_ids is None:
-            logger.warning("ent_node_to_chunk_ids is empty; skipping pcrag index artifacts.")
+            logger.warning("ent_node_to_chunk_ids is empty; skipping route index artifacts.")
             return
 
         self.entity_key_to_local_idx = {k: i for i, k in enumerate(self.entity_node_keys)}
@@ -46,7 +46,7 @@ class IndexArtifactsMixin:
         self.chunk_to_entities = chunk_to_entities
 
         # Build entity idf prior (index innovation #2)
-        if self.pcrag_config.use_entity_idf_index:
+        if self.config.route.index.entity_idf:
             num_chunks = max(1, len(self.passage_node_keys))
             entity_idf: Dict[str, float] = {}
             for ent_key, chunk_ids in self.ent_node_to_chunk_ids.items():
@@ -56,8 +56,8 @@ class IndexArtifactsMixin:
 
         # Precompute bridge neighbor cache (optional, can be expensive)
         self.bridge_neighbor_cache = {}
-        if self.pcrag_config.use_bridge_cache_index:
-            limit = min(self.pcrag_config.bridge_cache_entity_limit, len(self.entity_node_keys))
+        if self.config.route.index.bridge_cache:
+            limit = min(self.config.route.index.entity_limit, len(self.entity_node_keys))
             for ent_key in self.entity_node_keys[:limit]:
                 self.bridge_neighbor_cache[ent_key] = self._rank_bridge_neighbors(ent_key)
 
@@ -69,11 +69,11 @@ class IndexArtifactsMixin:
             "entity_idf_size": len(self.entity_idf),
             "bridge_cache_size": len(self.bridge_neighbor_cache),
             "config": {
-                "use_entity_idf_index": self.pcrag_config.use_entity_idf_index,
-                "use_bridge_cache_index": self.pcrag_config.use_bridge_cache_index,
+                "entity_idf": self.config.route.index.entity_idf,
+                "bridge_cache": self.config.route.index.bridge_cache,
             },
         }
-        with open(self._pcrag_artifacts_path, "w", encoding="utf-8") as f:
+        with open(self._route_artifacts_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
         logger.info("BindPack index artifacts built: chunk_to_entities=%d, entity_idf=%d, bridge_cache=%d", len(self.chunk_to_entities), len(self.entity_idf), len(self.bridge_neighbor_cache))

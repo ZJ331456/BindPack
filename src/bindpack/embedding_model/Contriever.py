@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..utils.logging_utils import get_logger
 from .base import BaseEmbeddingModel, EmbeddingConfig
 
@@ -19,7 +19,7 @@ def mean_pooling(token_embeddings, mask):
 
 class ContrieverModel(BaseEmbeddingModel):
 
-    def __init__(self, global_config: Optional[BaseConfig] = None, embedding_model_name: Optional[str] = None) -> None:
+    def __init__(self, global_config: Optional[RuntimeConfig] = None, embedding_model_name: Optional[str] = None) -> None:
         super().__init__(global_config=global_config)
 
         if embedding_model_name is not None:

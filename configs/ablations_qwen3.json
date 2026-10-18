@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "method_config": "src/bindpack/configuration/defaults.json",
+  "cases": ["full", "wo_route", "wo_plan", "wo_pack"],
+  "datasets": ["hotpotqa", "2wikimultihopqa", "musique"],
+  "datasets_dir": "/root/datasets",
+  "runtime": {
+    "python": "/root/anaconda3/envs/rag/bin/python",
+    "runtime_deps": "/root/.cache/pathcondrag/runtime_deps_qwen3_tf4513",
+    "llm_name": "qwen3-8b",
+    "llm_model_path": "/root/models/Qwen3-8B",
+    "llm_base_url": "http://127.0.0.1:8035/v1",
+    "embedding_model_name": "/root/models/Qwen3-Embedding-8B",
+    "embedding_batch_size": 4,
+    "openie_max_workers": 8,
+    "llm_prefetch_workers": 8,
+    "max_new_tokens": 2048,
+    "openie_strict": false,
+    "openie_prompt_version": "optimized",
+    "openie_validation_mode": "structural"
+  },
+  "evaluation": {
+    "eval_mode": "retrieve",
+    "sample_size": 0,
+    "smoke_sample_size": 2,
+    "sample_seed": 42,
+    "retrieval_top_k": 200,
+    "result_top_k": 10,
+    "candidate_output_top_k": 200,
+    "qa_top_k": 5,
+    "max_qa_steps": 1
+  }
+}

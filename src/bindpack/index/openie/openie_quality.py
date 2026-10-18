@@ -210,31 +210,19 @@ def extract_triple_list(response: str) -> List:
 
 
 def normalize_repair_payload(payload: dict):
-    """Unpack paired repair records; retain strict legacy-array compatibility.
-
-    Pairing makes evidence correspondence structural rather than asking a model
-    to keep two independently generated arrays at the same length.
-    """
+    """Unpack repair records that pair each triple with its source quote."""
     records = payload.get('triples')
     if not isinstance(records, list):
         raise ValueError('Repair triples must be an array')
-    if any(isinstance(record, dict) for record in records):
-        triples, quotes = [], []
-        for index, record in enumerate(records):
-            if not isinstance(record, dict) or set(record) != {'triple', 'support_quote'}:
-                raise ValueError(f'Repair triples[{index}] must contain exactly triple and support_quote')
-            triples.append(record['triple'])
-            quotes.append(record['support_quote'])
-        return triples, quotes, payload.get('status')
-    # Empty paired results have no legacy support_quotes member.
-    if not records and 'support_quotes' not in payload:
-        return [], [], payload.get('status')
-    quotes = payload.get('support_quotes')
-    if not isinstance(quotes, list) or len(quotes) != len(records):
-        count = len(quotes) if isinstance(quotes, list) else 'missing'
-        raise ValueError(f'Repair has {len(records)} triples but {count} support quotes; '
-                         'return paired records, each containing its own triple and support_quote')
-    return records, quotes, payload.get('status')
+    if 'support_quotes' in payload:
+        raise ValueError('Repair must use paired records, each containing triple and support_quote')
+    triples, quotes = [], []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict) or set(record) != {'triple', 'support_quote'}:
+            raise ValueError(f'Repair triples[{index}] must contain exactly triple and support_quote')
+        triples.append(record['triple'])
+        quotes.append(record['support_quote'])
+    return triples, quotes, payload.get('status')
 
 
 TRIPLE_JSON_SCHEMA = {

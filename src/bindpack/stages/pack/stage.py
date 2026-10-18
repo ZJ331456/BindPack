@@ -1,0 +1,28 @@
+"""Pack stage: score goals, select coverage, consolidate DAG packages and review."""
+from __future__ import annotations
+
+from .evidence_scorer import EvidenceScorer
+from .coverage_selector import CoverageSelector
+from .dag_package_selector import DAGPackageSelector
+from .verification.support_semantic_veto import postprocess_support_semantic_veto
+
+
+class PackStage:
+    """Compose the evaluated ranking objective and source-protected final review."""
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.scorer = EvidenceScorer()
+        self.coverage = CoverageSelector(runtime, self.scorer)
+        self.dag_selector = DAGPackageSelector(runtime._document)
+
+    def finalize(self, query, ids, scores, context, state):
+        result = self.coverage.select(query, ids, scores, context, state)
+        if self.runtime.cfg.stage_ablation in {"wo_plan", "wo_pack"}:
+            return result
+        return self.dag_selector.select(result, state)
+
+    def postprocess(self, inputs):
+        if self.runtime.cfg.stage_ablation == "wo_pack":
+            return {}
+        return postprocess_support_semantic_veto(self.runtime, inputs)

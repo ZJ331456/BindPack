@@ -14,7 +14,7 @@ def retrieve_knn(query_ids: List[str], key_ids: List[str], query_vecs, key_vecs,
         dict[query_id] -> (neighbor_key_indices: np.ndarray[int32], scores: np.ndarray[float32])
         where neighbor_key_indices index into ``key_ids``.
     """
-    knn_device = os.environ.get("HIPPORAG_KNN_DEVICE", "cpu").strip().lower()
+    knn_device = os.environ.get("BINDPACK_KNN_DEVICE", "cpu").strip().lower()
     if knn_device == "cuda" and torch.cuda.is_available():
         device = torch.device("cuda")
     else:

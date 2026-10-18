@@ -83,10 +83,10 @@ def _resolve_quality_max_retries(explicit):
         if explicit < 0:
             raise ValueError("quality_max_retries cannot be negative.")
         return explicit
-    raw = os.environ.get("HIPPO_OPENIE_QUALITY_MAX_RETRIES", "").strip()
+    raw = os.environ.get("BINDPACK_OPENIE_QUALITY_MAX_RETRIES", "").strip()
     if raw:
         value = int(raw)
         if value < 0:
-            raise ValueError("HIPPO_OPENIE_QUALITY_MAX_RETRIES cannot be negative.")
+            raise ValueError("BINDPACK_OPENIE_QUALITY_MAX_RETRIES cannot be negative.")
         return value
     return _DEFAULT_QUALITY_MAX_RETRIES

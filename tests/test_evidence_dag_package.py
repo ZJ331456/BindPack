@@ -1,38 +1,22 @@
 """CPU tests for finite DAG closure selection and strict source support."""
 import copy
-import importlib.util
-from pathlib import Path
-import sys
-from types import ModuleType
 import unittest
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ModuleType("dag_package_evidence_test_package")
-PACKAGE.__path__ = [str(ROOT / "src/bindpack")]
-sys.modules[PACKAGE.__name__] = PACKAGE
-SPEC = importlib.util.spec_from_file_location(
-    PACKAGE.__name__ + ".evidence.selection.evidence_dag_package", ROOT / "src/bindpack/evidence/selection/evidence_dag_package.py")
-module = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = module
-SPEC.loader.exec_module(module)
+from bindpack.stages.pack import dag_package_selector as module
 
 
-class Parent:
-    def finalize(self, query, ids, scores, ctx, state):
-        self.parent_calls += 1
-        return ids, scores, state["evidence_trace"]
-
-
-class Engine(module.DAGPackageMixin, Parent):
-    def __init__(self, enabled=True):
-        self.improvements = {"dag_package"} if enabled else {"planning", "plan_prune"}
-        self.stage, self.parent_calls = 4, 0
+class Engine:
+    def __init__(self):
         self.documents = {d: f"Other {d}\nAn unrelated article {d}." for d in range(220)}
+        self.selector = module.DAGPackageSelector(self._document)
 
     def _document(self, doc_id):
         return self.documents[doc_id]
+
+    def finalize(self, query, ids, scores, ctx, state):
+        return self.selector.select((ids, scores, state["evidence_trace"]), state)
 
 
 def state_for(engine, nodes, bindings, proof_rows):
@@ -95,12 +79,6 @@ def run(engine, state, ids=None, scores=None):
 
 
 class DAGPackageTests(unittest.TestCase):
-    def test_disabled_flag_returns_exact_parent_objects(self):
-        for e in [Engine(False)]:
-            s = parallel(e); ids, scores = np.arange(220), np.ones(220)
-            actual = run(e, s, ids, scores)
-            self.assertIs(actual[0], ids); self.assertIs(actual[1], scores)
-            self.assertIs(actual[2], s["evidence_trace"]); self.assertEqual(e.parent_calls, 1)
 
     def test_parallel_branches_complete_prefix_with_full_name_and_reordered_lead(self):
         e = Engine(); s = parallel(e); before = copy.deepcopy(s)

@@ -7,7 +7,7 @@ import numpy as np
 from copy import deepcopy
 from gritlm import GritLM
 
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..utils.logging_utils import get_logger
 from ..utils.llm_utils import TextChatMessage
 
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 class GritLMEmbeddingModel(BaseEmbeddingModel):
 
-    def __init__(self, global_config: Optional[BaseConfig] = None, embedding_model_name: Optional[str] = None) -> None:
+    def __init__(self, global_config: Optional[RuntimeConfig] = None, embedding_model_name: Optional[str] = None) -> None:
         super().__init__(global_config=global_config)
         
         if embedding_model_name is not None:

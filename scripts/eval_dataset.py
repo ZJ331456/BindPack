@@ -2,6 +2,7 @@
 """BindPack dataset evaluation entry."""
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -72,13 +73,14 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
     if hop_source != "benchmark":
         raise ValueError(f"Unknown hop_source={hop_source!r}")
 
-    llm_name = args.llm_name or os.environ.get("HIPPO_LLM_NAME", "qwen3-8b")
-    llm_base_url = args.llm_base_url or os.environ.get("HIPPO_LLM_BASE_URL", "http://127.0.0.1:8035/v1")
-    embedding_model_name = args.embedding_model_name or os.environ.get("HIPPO_EMBEDDING_MODEL_NAME", "/root/models/NV-Embed-v2")
-    embedding_base_url = args.embedding_base_url or os.environ.get("HIPPO_EMBEDDING_BASE_URL", "")
-
-    eval_subdir = args.eval_subdir or os.environ.get("HIPPO_EVAL_SUBDIR", "eval_results_bindpack")
-    save_dir = args.save_dir or os.path.join(BindPack_ROOT, "outputs", eval_subdir, dataset)
+    method_path = Path(args.method_config).expanduser().resolve()
+    method_bytes = method_path.read_bytes()
+    method_metadata = {
+        "path": str(method_path),
+        "sha256": hashlib.sha256(method_bytes).hexdigest(),
+        "parameters": json.loads(method_bytes),
+    }
+    save_dir = args.save_dir or os.path.join(BindPack_ROOT, "outputs", "evaluation", dataset)
 
     logger.info("[1/4] Loading dataset: %s", dataset)
     samples_all = load_json(data_path)
@@ -148,129 +150,29 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
         args.corpus_mode,
     )
 
-    cfg_kwargs = dict(
-        save_dir=save_dir,
-        dataset=dataset,
-        corpus_len=len(docs),
-        llm_name=llm_name,
-        llm_base_url=llm_base_url,
-        embedding_model_name=embedding_model_name,
-        embedding_base_url=embedding_base_url,
-        force_index_from_scratch=bool(args.force_index_from_scratch),
-        force_openie_from_scratch=bool(args.force_openie_from_scratch),
-        retrieval_top_k=int(args.retrieval_top_k),
-        linking_top_k=int(args.linking_top_k),
-        qa_top_k=int(args.qa_top_k),
-        max_new_tokens=args.max_new_tokens,
-        max_qa_steps=int(args.max_qa_steps),
-        embedding_batch_size=int(args.embedding_batch_size),
-        openie_max_workers=getattr(args, "openie_max_workers", None),
-        openie_strict=getattr(args, "openie_strict", True),
-        openie_prompt_version=getattr(args, "openie_prompt_version", "optimized"),
-        openie_validation_mode=getattr(args, "openie_validation_mode", "structural"),
-        llm_prefetch_workers=int(getattr(args, "llm_prefetch_workers", 8)),
-        improvement_stage=int(getattr(args, "improvement_stage", 4)),
-        evidence_improvements=getattr(args, "evidence_improvements", "planning,plan_prune,dag_package,support_semantic_veto"),
-        evidence_plan_node_budget=int(getattr(args, "evidence_plan_node_budget", 6)),
-        evidence_plan_depth_budget=int(getattr(args, "evidence_plan_depth_budget", 4)),
-        evidence_plan_validation=getattr(args, "evidence_plan_validation", "canonical_refs"),
-        evidence_plan_routing=getattr(args, "evidence_plan_routing", "question_structure"),
-        use_iterative_retrieval=bool(args.use_iterative_retrieval),
-        use_qcappr=not args.no_qcappr,
-        use_eba=not args.no_eba,
-        use_path_set_optimization=not args.no_path_set_opt,
-        use_entity_idf_index=not args.no_entity_idf_index,
-        use_bridge_cache_index=not args.no_bridge_cache_index,
-    )
-
-    # Memory-safe synonymy on small hosts (same defaults as /root/eval HippoRAG2 runners).
-    # Set BindPack_SAFE_SYNONYMY=0 to use BaseConfig defaults (topk=2047).
-    if os.environ.get("BindPack_SAFE_SYNONYMY", "1").strip().lower() not in ("0", "false", "no"):
-        cfg_kwargs["synonymy_edge_topk"] = int(os.environ.get("SYNONYMY_EDGE_TOPK", "50"))
-        cfg_kwargs["synonymy_edge_query_batch_size"] = int(os.environ.get("SYNONYMY_EDGE_QUERY_BATCH", "128"))
-        cfg_kwargs["synonymy_edge_key_batch_size"] = int(os.environ.get("SYNONYMY_EDGE_KEY_BATCH", "1024"))
-        logger.info(
-            "Safe synonymy enabled: topk=%s query_bs=%s key_bs=%s",
-            cfg_kwargs["synonymy_edge_topk"],
-            cfg_kwargs["synonymy_edge_query_batch_size"],
-            cfg_kwargs["synonymy_edge_key_batch_size"],
-        )
-
-    if args.path_set_size is not None:
-        cfg_kwargs["path_set_size"] = int(args.path_set_size)
-    if args.path_candidate_docs is not None:
-        cfg_kwargs["path_candidate_docs"] = int(args.path_candidate_docs)
-    if args.path_set_diversity_lambda is not None:
-        cfg_kwargs["path_set_diversity_lambda"] = float(args.path_set_diversity_lambda)
-    if args.eba_bridge_weight is not None:
-        cfg_kwargs["eba_bridge_weight"] = float(args.eba_bridge_weight)
-    if args.qcappr_hub_penalty_gamma is not None:
-        cfg_kwargs["qcappr_hub_penalty_gamma"] = float(args.qcappr_hub_penalty_gamma)
-    if args.eba_bridge_semantic_threshold is not None:
-        cfg_kwargs["eba_bridge_semantic_threshold"] = float(args.eba_bridge_semantic_threshold)
-    if args.qcappr_single_hop_damping is not None:
-        cfg_kwargs["qcappr_single_hop_damping"] = float(args.qcappr_single_hop_damping)
-    if args.qcappr_two_hop_damping is not None:
-        cfg_kwargs["qcappr_two_hop_damping"] = float(args.qcappr_two_hop_damping)
-    if args.qcappr_multi_hop_damping is not None:
-        cfg_kwargs["qcappr_multi_hop_damping"] = float(args.qcappr_multi_hop_damping)
-    if args.iterative_round1_top_docs is not None:
-        cfg_kwargs["iterative_round1_top_docs"] = int(args.iterative_round1_top_docs)
-    if args.iterative_round2_seed_top_k is not None:
-        cfg_kwargs["iterative_round2_seed_top_k"] = int(args.iterative_round2_seed_top_k)
-    if args.iterative_merge_alpha is not None:
-        cfg_kwargs["iterative_merge_alpha"] = float(args.iterative_merge_alpha)
-    if args.iterative_min_seed_entities is not None:
-        cfg_kwargs["iterative_min_seed_entities"] = int(args.iterative_min_seed_entities)
-    if args.iterative_damping is not None:
-        cfg_kwargs["iterative_damping"] = float(args.iterative_damping)
-
-    # Query Decomposition
-    if args.use_query_decomposition:
-        cfg_kwargs["use_query_decomposition"] = True
-    if args.qd_min_hops is not None:
-        cfg_kwargs["qd_min_hops"] = int(args.qd_min_hops)
-    if args.qd_max_sub_questions is not None:
-        cfg_kwargs["qd_max_sub_questions"] = int(args.qd_max_sub_questions)
-    if args.qd_sub_retrieval_top_k is not None:
-        cfg_kwargs["qd_sub_retrieval_top_k"] = int(args.qd_sub_retrieval_top_k)
-    if args.qd_merge_alpha is not None:
-        cfg_kwargs["qd_merge_alpha"] = float(args.qd_merge_alpha)
-    if args.qd_llm_temperature is not None:
-        cfg_kwargs["qd_llm_temperature"] = float(args.qd_llm_temperature)
-    if args.use_path_conditioned_qd:
-        cfg_kwargs["use_path_conditioned_qd"] = True
-    if args.no_pcqd_include_static_qd:
-        cfg_kwargs["pcqd_include_static_qd"] = False
-    if args.no_pcqd_fallback_to_static:
-        cfg_kwargs["pcqd_fallback_to_static"] = False
-    if args.pcqd_ground_top_docs is not None:
-        cfg_kwargs["pcqd_ground_top_docs"] = int(args.pcqd_ground_top_docs)
-    if args.pcqd_entity_top_k is not None:
-        cfg_kwargs["pcqd_entity_top_k"] = int(args.pcqd_entity_top_k)
-    if args.pcqd_path_score_threshold is not None:
-        cfg_kwargs["pcqd_path_score_threshold"] = float(args.pcqd_path_score_threshold)
-    if args.no_pcqd_bridge_voting:
-        cfg_kwargs["pcqd_enable_bridge_voting"] = False
-    if args.pcqd_max_bridges_per_source is not None:
-        cfg_kwargs["pcqd_max_bridges_per_source"] = int(args.pcqd_max_bridges_per_source)
-    if args.pcqd_weight_base is not None:
-        cfg_kwargs["pcqd_weight_base"] = float(args.pcqd_weight_base)
-    if args.pcqd_weight_static is not None:
-        cfg_kwargs["pcqd_weight_static"] = float(args.pcqd_weight_static)
-    if args.pcqd_weight_path is not None:
-        cfg_kwargs["pcqd_weight_path"] = float(args.pcqd_weight_path)
-
-    if dataset == "musique":
-        cfg_kwargs["qd_max_sub_questions"] = max(4, int(cfg_kwargs.get("qd_max_sub_questions", 4)))
-    elif dataset in ("nq", "popqa"):
-        # The single-hop prior avoids unnecessary multi-hop decomposition.
-        cfg_kwargs["qd_min_hops"] = 2
-
-    config = BindPackConfig(**cfg_kwargs)
+    runtime_overrides = {
+        "save_dir": save_dir,
+        "dataset": dataset,
+        "corpus_len": len(docs),
+        "force_index_from_scratch": args.force_index_from_scratch,
+        "force_openie_from_scratch": args.force_openie_from_scratch,
+        "stage_ablation": args.stage_ablation,
+    }
+    # Fixed algorithm parameters come from one method file. Only resource and
+    # evaluation controls may be overridden at this command-line boundary.
+    for name in (
+        "llm_name", "llm_base_url", "embedding_model_name", "embedding_base_url",
+        "retrieval_top_k", "qa_top_k", "max_new_tokens", "max_qa_steps",
+        "embedding_batch_size", "openie_max_workers", "openie_strict",
+        "openie_prompt_version", "openie_validation_mode", "llm_prefetch_workers",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            runtime_overrides[name] = value
+    config = BindPackConfig.from_file(method_path, **runtime_overrides)
 
     logger.info("[2/4] %s", "Loading shared index" if args.reuse_index else "Building index")
-    rag = BindPack(global_config=config)
+    rag = BindPack(config=config)
     if getattr(args, "reuse_index", False):
         if set(rag.chunk_embedding_store.get_all_texts()) != set(docs):
             raise ValueError("Shared index passages differ from the evaluation corpus")
@@ -281,6 +183,20 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
         logger.info("Reused existing graph/vectors; built only BindPack side artifacts")
     else:
         rag.index(docs=docs)
+    if getattr(args, "index_only", False):
+        if set(rag.chunk_embedding_store.get_all_texts()) != set(docs):
+            raise ValueError("Constructed passage index does not cover the evaluation corpus")
+        if not os.path.isfile(os.path.join(rag.working_dir, "graph.pickle")):
+            raise ValueError("Index construction did not produce a graph")
+        out_path = args.output or os.path.join(save_dir, "index_build_report.json")
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as stream:
+            json.dump({"dataset": dataset, "eval_mode": "index_only", "index_build_complete": True,
+                       "indexed_docs": len(set(docs)), "selected_indices": selected_indices,
+                       "runtime_config": asdict(config), "method_config": method_metadata},
+                      stream, ensure_ascii=False, indent=2)
+        logger.info("Index ready: %s", out_path)
+        return out_path
     rag.set_query_hop_overrides(hops=benchmark_hops, source="benchmark")
     logger.info("Benchmark hop policy: %s; selected distribution=%s", hop_provenance,
                 dict(Counter(str(h) for h in benchmark_hops)))
@@ -295,25 +211,17 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
     predicted_answers_for_stratified = None
 
     if args.eval_mode == "rag_qa" and has_answers:
-        if getattr(args, "rag_qa_mode", "full") == "dpr_only":
-            logger.info("rag_qa_mode=dpr_only: using rag_qa_dpr() (dense retrieval + QA)")
-            query_solutions, _, _, retrieval_metrics, qa_metrics = rag.rag_qa_dpr(
-                queries=queries,
-                gold_docs=gold_docs,
-                gold_answers=gold_answers,
-            )
-        else:
-            query_solutions, _, _, retrieval_metrics, qa_metrics = rag.rag_qa(
-                queries=queries,
-                gold_docs=gold_docs,
-                gold_answers=gold_answers,
-            )
+        query_solutions, _, _, retrieval_metrics, qa_metrics = rag.rag_qa(
+            queries=queries,
+            gold_docs=gold_docs,
+            gold_answers=gold_answers,
+        )
         solutions = query_solutions
         predicted_answers_for_stratified = [q.answer if q.answer is not None else "" for q in query_solutions]
     else:
         retrieval_results, retrieval_metrics = rag.retrieve(
             queries=queries,
-            num_to_retrieve=int(args.retrieval_top_k),
+            num_to_retrieve=config.retrieval_top_k,
             gold_docs=gold_docs,
         )
         solutions = retrieval_results
@@ -365,6 +273,7 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
         json.dump(
             {
                 "dataset": dataset,
+                "stage_ablation": config.stage_ablation,
                 "hop_source": hop_source,
                 "hop_provenance": hop_provenance,
                 "hop_distribution": (
@@ -385,7 +294,6 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
                 "corpus_mode": args.corpus_mode,
                 "indexed_docs": len(docs),
                 "eval_mode": args.eval_mode,
-                "rag_qa_mode": getattr(args, "rag_qa_mode", "full"),
                 "retrieval_metrics": retrieval_metrics,
                 "qa_metrics": qa_metrics,
                 "retrieval_diagnostics": retrieval_diagnostics,
@@ -395,15 +303,8 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
                     if hasattr(rag.llm_model, "get_request_stats") else {}
                 ),
                 "runtime_config": asdict(config),
+                "method_config": method_metadata,
                 "results": output_rows,
-                "runtime": {
-                    "llm_name": llm_name,
-                    "llm_base_url": llm_base_url,
-                    "embedding_model_name": embedding_model_name,
-                    "embedding_base_url": embedding_base_url,
-                    "save_dir": save_dir,
-                    "pcrag_config": asdict(config),
-                },
             },
             f,
             ensure_ascii=False,
@@ -437,13 +338,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample_index", type=int, default=-1)
     parser.add_argument("--sample_indices_file", default="")
     parser.add_argument("--reuse_index", action="store_true")
-    parser.add_argument("--improvement_stage", type=int, choices=[4], default=4)
-    parser.add_argument("--evidence_improvements", default="planning,plan_prune,dag_package,support_semantic_veto",
-                        help="Retained component flags: planning,plan_prune,dag_package,support_semantic_veto. Subsets disable components for controlled ablations.")
-    parser.add_argument("--evidence_plan_node_budget", type=int, default=6)
-    parser.add_argument("--evidence_plan_depth_budget", type=int, default=4)
-    parser.add_argument("--evidence_plan_validation", choices=["canonical_refs"], default="canonical_refs")
-    parser.add_argument("--evidence_plan_routing", choices=["question_structure"], default="question_structure")
+    parser.add_argument("--index_only", action="store_true", help="Build/check the shared index and exit before retrieval.")
+    parser.add_argument("--stage_ablation", choices=["full", "wo_route", "wo_plan", "wo_pack"],
+                        default="full", help="Whole-stage controls: complete method, fixed graph/DPR Route baseline, no dependency Plan, or no Pack.")
+    parser.add_argument("--method_config", default=str(Path(BindPack_ROOT) / "src/bindpack/configuration/defaults.json"),
+                        help="Fixed Route, Plan, Pack and shared-candidate parameters as JSON.")
 
     parser.add_argument("--corpus_mode", choices=["full", "sample_only"], default="full")
     parser.add_argument("--max_corpus_docs", type=int, default=0)
@@ -451,88 +350,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no_ensure_gold_in_corpus", dest="ensure_gold_in_corpus", action="store_false")
 
     parser.add_argument("--eval_mode", choices=["rag_qa", "retrieve"], default="retrieve")
-    parser.add_argument(
-        "--rag_qa_mode",
-        choices=["full", "dpr_only"],
-        default="full",
-        help="rag_qa path: full=graph-enhanced rag_qa(); dpr_only=dense passage retrieval + QA (rag_qa_dpr).",
-    )
-    parser.add_argument("--retrieval_top_k", type=int, default=200)
+    parser.add_argument("--retrieval_top_k", type=int)
     parser.add_argument("--result_top_k", type=int, default=10)
     parser.add_argument("--candidate_output_top_k", type=int, default=200)
-    parser.add_argument("--linking_top_k", type=int, default=5)
-    parser.add_argument("--qa_top_k", type=int, default=5)
-    parser.add_argument("--max_qa_steps", type=int, default=1)
-    parser.add_argument("--max_new_tokens", type=int, default=2048)
-    parser.add_argument("--embedding_batch_size", type=int, default=4)
-    parser.add_argument("--openie_strict", type=parse_bool, default=True,
+    parser.add_argument("--qa_top_k", type=int, default=None)
+    parser.add_argument("--max_qa_steps", type=int, default=None)
+    parser.add_argument("--max_new_tokens", type=int, default=None)
+    parser.add_argument("--embedding_batch_size", type=int, default=None)
+    parser.add_argument("--openie_strict", type=parse_bool, default=None,
                         help="true aborts on final extraction failure; false excludes failed relations and continues.")
-    parser.add_argument("--openie_prompt_version", choices=["origin", "optimized"], default="optimized")
-    parser.add_argument("--openie_validation_mode", choices=["structural", "source_verified"], default="structural",
+    parser.add_argument("--openie_prompt_version", choices=["origin", "optimized"], default=None)
+    parser.add_argument("--openie_validation_mode", choices=["structural", "source_verified"], default=None,
                         help="Index extraction: local structure checks (default) or extra LLM source evidence audits.")
     parser.add_argument("--openie_max_workers", type=_openie_worker_count, default=None,
-                        help="Online indexing NER/triple concurrency (1..8). Explicit values override all HIPPO_OPENIE_* worker env settings; omitted uses env or 8. HTTP ceiling still applies.")
-    parser.add_argument("--llm_prefetch_workers", type=int, default=8,
-                        help="Bounded QD/PCQD LLM prefetch across queries (default 8); 1 keeps serial behavior.")
+                        help="Online indexing NER/triple concurrency (1..8); omitted uses method configuration.")
+    parser.add_argument("--llm_prefetch_workers", type=int, default=None,
+                        help="Bounded QD/PCQD LLM prefetch across queries; omitted uses method configuration.")
 
     parser.add_argument("--save_dir", default="")
-    parser.add_argument("--eval_subdir", default="")
     parser.add_argument("--output", default="")
 
-    parser.add_argument("--llm_name", default="")
-    parser.add_argument("--llm_base_url", default="")
-    parser.add_argument("--embedding_model_name", default="")
-    parser.add_argument("--embedding_base_url", default="")
+    parser.add_argument("--llm_name", default=None)
+    parser.add_argument("--llm_base_url", default=None)
+    parser.add_argument("--embedding_model_name", default=None)
+    parser.add_argument("--embedding_base_url", default=None)
 
     parser.add_argument("--force_index_from_scratch", action="store_true", default=False)
     parser.add_argument("--force_openie_from_scratch", action="store_true", default=False)
-
-    # Path-centric module toggles
-    parser.add_argument("--use_iterative_retrieval", action="store_true", default=True)
-    parser.add_argument("--no_iterative_retrieval", dest="use_iterative_retrieval", action="store_false")
-    parser.add_argument("--no_qcappr", action="store_true", default=False)
-    parser.add_argument("--no_eba", action="store_true", default=False)
-    parser.add_argument("--no_path_set_opt", action="store_true", default=False)
-
-    # Index innovation toggles
-    parser.add_argument("--no_entity_idf_index", action="store_true", default=False)
-    parser.add_argument("--no_bridge_cache_index", action="store_true", default=False)
-
-    # Parameters of retained components
-    parser.add_argument("--path_set_size", type=int, default=None)
-    parser.add_argument("--path_candidate_docs", type=int, default=None)
-    parser.add_argument("--path_set_diversity_lambda", type=float, default=None)
-    parser.add_argument("--eba_bridge_weight", type=float, default=None)
-    parser.add_argument("--eba_bridge_semantic_threshold", type=float, default=None)
-    parser.add_argument("--qcappr_hub_penalty_gamma", type=float, default=None)
-    parser.add_argument("--qcappr_single_hop_damping", type=float, default=None)
-    parser.add_argument("--qcappr_two_hop_damping", type=float, default=None)
-    parser.add_argument("--qcappr_multi_hop_damping", type=float, default=None)
-    parser.add_argument("--iterative_round1_top_docs", type=int, default=None)
-    parser.add_argument("--iterative_round2_seed_top_k", type=int, default=None)
-    parser.add_argument("--iterative_merge_alpha", type=float, default=None)
-    parser.add_argument("--iterative_min_seed_entities", type=int, default=None)
-    parser.add_argument("--iterative_damping", type=float, default=None)
-
-    # Query Decomposition
-    parser.add_argument("--use_query_decomposition", action="store_true", default=False)
-    parser.add_argument("--qd_min_hops", type=int, default=None)
-    parser.add_argument("--qd_max_sub_questions", type=int, default=None)
-    parser.add_argument("--qd_sub_retrieval_top_k", type=int, default=None)
-    parser.add_argument("--qd_merge_alpha", type=float, default=None)
-    parser.add_argument("--qd_llm_temperature", type=float, default=None)
-    parser.add_argument("--use_path_conditioned_qd", action="store_true", default=False)
-    parser.add_argument("--no_pcqd_include_static_qd", action="store_true", default=False)
-    parser.add_argument("--no_pcqd_fallback_to_static", action="store_true", default=False)
-    parser.add_argument("--pcqd_ground_top_docs", type=int, default=None)
-    parser.add_argument("--pcqd_entity_top_k", type=int, default=None)
-    parser.add_argument("--pcqd_path_score_threshold", type=float, default=None)
-    parser.add_argument("--no_pcqd_bridge_voting", action="store_true", default=False)
-    parser.add_argument("--pcqd_max_bridges_per_source", type=int, default=None)
-    parser.add_argument("--pcqd_weight_base", type=float, default=None)
-    parser.add_argument("--pcqd_weight_static", type=float, default=None)
-    parser.add_argument("--pcqd_weight_path", type=float, default=None)
-
 
     # Evaluation options
     parser.add_argument("--stratified_eval", action="store_true", default=False,

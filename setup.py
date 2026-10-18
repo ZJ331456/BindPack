@@ -6,5 +6,6 @@ setup(
     description="BindPack: source-bound dependency execution and evidence package selection for multi-hop RAG",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
+    package_data={"bindpack.configuration": ["defaults.json"]},
     extras_require={"index-quality": ["xgrammar==0.1.18"]},
 )

@@ -1,0 +1,127 @@
+{
+  "runtime": {
+    "llm_name": "qwen3-8b",
+    "embedding_model_name": "/root/models/Qwen3-Embedding-8B",
+    "llm_base_url": "http://127.0.0.1:8035/v1",
+    "max_new_tokens": 2048,
+    "embedding_batch_size": 4,
+    "llm_prefetch_workers": 8,
+    "openie_strict": false,
+    "openie_prompt_version": "optimized",
+    "openie_validation_mode": "structural",
+    "synonymy_edge_topk": 50,
+    "synonymy_edge_query_batch_size": 128,
+    "synonymy_edge_key_batch_size": 1024,
+    "embedding_base_url": null,
+    "azure_endpoint": null,
+    "azure_embedding_endpoint": null,
+    "num_gen_choices": 1,
+    "seed": null,
+    "temperature": 0,
+    "response_format": {
+      "type": "json_object"
+    },
+    "max_retry_attempts": 5,
+    "force_openie_from_scratch": false,
+    "force_index_from_scratch": false,
+    "rerank_dspy_file_path": null,
+    "passage_node_weight": 0.05,
+    "save_openie": true,
+    "openie_mode": "online",
+    "openie_max_workers": null,
+    "embedding_return_as_normalized": true,
+    "embedding_max_seq_len": 2048,
+    "embedding_model_dtype": "auto",
+    "synonymy_edge_sim_threshold": 0.8,
+    "is_directed_graph": false,
+    "linking_top_k": 5,
+    "retrieval_top_k": 200,
+    "damping": 0.5,
+    "max_qa_steps": 1,
+    "qa_top_k": 5,
+    "save_dir": null,
+    "dataset": null,
+    "corpus_len": null
+  },
+  "candidates": {
+    "top_k": 20,
+    "pool_size": 80,
+    "max_searches": 20,
+    "rank_constant": 10.0
+  },
+  "pack": {
+    "budget": 5,
+    "base_weight": 0.4,
+    "coverage_weight": 0.45,
+    "relation_weight": 0.25,
+    "redundancy_weight": 0.15,
+    "review_tokenizer": "/root/models/Qwen3-8B",
+    "review_context_length": 8192
+  },
+  "plan": {
+    "node_budget": 6,
+    "depth_budget": 4,
+    "beam_width": 1,
+    "verification_top_k": 3,
+    "verification_passage_chars": 4000
+  },
+  "route": {
+    "seed": {
+      "hub_penalty_gamma": 0.35,
+      "single_hop_damping": 0.85,
+      "two_hop_damping": 0.5,
+      "multi_hop_damping": 0.45,
+      "single_hop_temperature": 0.35,
+      "two_hop_temperature": 0.7,
+      "multi_hop_temperature": 1.0
+    },
+    "bridge": {
+      "first_hop_k": 20,
+      "top_k": 8,
+      "weight": 0.25,
+      "semantic_threshold": 0.1
+    },
+    "paths": {
+      "candidate_docs": 80,
+      "set_size": 12,
+      "relevance_weight": 0.55,
+      "connectivity_weight": 0.15,
+      "consistency_weight": 0.15,
+      "completeness_weight": 0.15,
+      "diversity_lambda": 0.35
+    },
+    "index": {
+      "entity_idf": true,
+      "bridge_cache": true,
+      "bridge_cache_top_k": 32,
+      "entity_limit": 120000
+    },
+    "iterative": {
+      "round1_top_docs": 1,
+      "seed_top_k": 5,
+      "merge_alpha": 0.45,
+      "min_seed_entities": 1,
+      "damping": -1.0
+    },
+    "refinement": {
+      "min_hops": 2,
+      "max_sub_questions": 4,
+      "sub_retrieval_top_k": 3,
+      "merge_alpha": 0.3,
+      "temperature": 0.0,
+      "cache_decompositions": true,
+      "pcqd": {
+        "include_static": true,
+        "fallback_to_static": true,
+        "ground_top_docs": 5,
+        "entity_top_k": 3,
+        "path_score_threshold": 0.6,
+        "bridge_voting": true,
+        "max_bridges_per_source": 1,
+        "weight_base": 0.4,
+        "weight_static": 0.2,
+        "weight_path": 0.4
+      }
+    }
+  }
+}

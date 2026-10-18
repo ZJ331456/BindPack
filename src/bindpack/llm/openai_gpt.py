@@ -1,3 +1,4 @@
+from dataclasses import asdict
 import functools
 import hashlib
 import json
@@ -18,7 +19,7 @@ from openai import OpenAI
 from openai import AzureOpenAI
 from packaging import version
 
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..utils.llm_utils import (
     TextChatMessage
 )
@@ -52,7 +53,7 @@ def _safe_env_float(name: str, default: float) -> float:
 
 # This bound is shared by every CacheOpenAI instance in this process. Waiting and
 # retry backoff happen outside the semaphore, so only active HTTP calls occupy it.
-LLM_MAX_IN_FLIGHT = _safe_env_int("PATHCONDRAG_LLM_MAX_IN_FLIGHT", 8)
+LLM_MAX_IN_FLIGHT = _safe_env_int("BINDPACK_LLM_MAX_IN_FLIGHT", 8)
 _LLM_HTTP_SEMAPHORE = threading.BoundedSemaphore(LLM_MAX_IN_FLIGHT)
 
 
@@ -137,38 +138,6 @@ def cache_response(func):
             json.dumps(key_data, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
 
-        # Existing non-Qwen caches remain usable. Qwen3 legacy entries cannot
-        # establish whether thinking was enabled, so never read them.
-        legacy_hashes = []
-        model_name = str(generation_params.get("model") or "").lower()
-        configured_name = str(getattr(self, "llm_name", "") or "").lower()
-        old_key_fields = {"model", "seed", "temperature", "max_completion_tokens",
-                          "max_tokens", "max_new_tokens", "n"}
-        legacy_compatible = (set(generation_params).issubset(old_key_fields)
-                             and generation_params.get("n", 1) == 1)
-        if "qwen3" not in model_name and "qwen3" not in configured_name and legacy_compatible:
-            gen_params = self.llm_config.generate_params
-            model = kwargs.get("model", gen_params.get("model"))
-            seed = kwargs.get("seed", gen_params.get("seed"))
-            temperature = kwargs.get("temperature", gen_params.get("temperature"))
-            max_tokens = (
-                kwargs.get("max_completion_tokens")
-                or kwargs.get("max_tokens")
-                or kwargs.get("max_new_tokens")
-                or gen_params.get("max_completion_tokens")
-                or gen_params.get("max_tokens")
-                or gen_params.get("max_new_tokens")
-            )
-            for legacy_key_data in (
-                {"messages": messages, "model": model, "seed": seed,
-                 "temperature": temperature, "max_tokens": max_tokens},
-                {"messages": messages, "model": model, "seed": seed,
-                 "temperature": temperature},
-            ):
-                legacy_hashes.append(hashlib.sha256(
-                    json.dumps(legacy_key_data, sort_keys=True, default=str).encode("utf-8")
-                ).hexdigest())
-
         # the file name of lock, ensure mutual exclusion when accessing concurrently
         lock_file = self.cache_file_name + ".lock"
 
@@ -187,18 +156,6 @@ def cache_response(func):
             conn.commit()  # commit to save the table creation
             c.execute("SELECT message, metadata FROM cache WHERE key = ?", (key_hash,))
             row = c.fetchone()
-            if row is None:
-                for legacy_idx, legacy_hash in enumerate(legacy_hashes):
-                    c.execute("SELECT message, metadata FROM cache WHERE key = ?", (legacy_hash,))
-                    row = c.fetchone()
-                    if row is not None and legacy_idx == 1:
-                        # The oldest key omitted the token budget. Its truncated
-                        # response must not satisfy a larger-budget retry.
-                        _msg, _meta_str = row
-                        if json.loads(_meta_str).get("finish_reason") == "length":
-                            row = None
-                    if row is not None:
-                        break
             conn.close()
             if row is not None:
                 message, metadata_str = row
@@ -260,9 +217,7 @@ def dynamic_retry_decorator(func):
 class CacheOpenAI(BaseLLM):
     """OpenAI LLM implementation."""
     @classmethod
-    def from_experiment_config(cls, global_config: BaseConfig) -> "CacheOpenAI":
-        config_dict = global_config.__dict__
-        config_dict['max_retries'] = global_config.max_retry_attempts
+    def from_experiment_config(cls, global_config: RuntimeConfig) -> "CacheOpenAI":
         cache_dir = os.path.join(global_config.save_dir, "llm_cache")
         return cls(cache_dir=cache_dir, global_config=global_config)
 
@@ -290,12 +245,12 @@ class CacheOpenAI(BaseLLM):
 
         self._init_llm_config()
         if high_throughput:
-            max_connections = _safe_env_int("HIPPO_HTTP_MAX_CONNECTIONS", 500)
-            max_keepalive = min(_safe_env_int("HIPPO_HTTP_MAX_KEEPALIVE", 100), max_connections)
-            connect_timeout = _safe_env_float("HIPPO_HTTP_CONNECT_TIMEOUT_SEC", 20.0)
-            read_timeout = _safe_env_float("HIPPO_HTTP_READ_TIMEOUT_SEC", 300.0)
-            write_timeout = _safe_env_float("HIPPO_HTTP_WRITE_TIMEOUT_SEC", read_timeout)
-            pool_timeout = _safe_env_float("HIPPO_HTTP_POOL_TIMEOUT_SEC", 30.0)
+            max_connections = _safe_env_int("BINDPACK_HTTP_MAX_CONNECTIONS", 500)
+            max_keepalive = min(_safe_env_int("BINDPACK_HTTP_MAX_KEEPALIVE", 100), max_connections)
+            connect_timeout = _safe_env_float("BINDPACK_HTTP_CONNECT_TIMEOUT_SEC", 20.0)
+            read_timeout = _safe_env_float("BINDPACK_HTTP_READ_TIMEOUT_SEC", 300.0)
+            write_timeout = _safe_env_float("BINDPACK_HTTP_WRITE_TIMEOUT_SEC", read_timeout)
+            pool_timeout = _safe_env_float("BINDPACK_HTTP_POOL_TIMEOUT_SEC", 30.0)
             limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_keepalive)
             client = httpx.Client(
                 limits=limits,
@@ -310,7 +265,7 @@ class CacheOpenAI(BaseLLM):
             client = None
 
         # max_retries is the total attempt budget for our one retry layer.
-        self.max_retries = kwargs.get("max_retries", _safe_env_int("HIPPO_OPENAI_MAX_RETRIES", 2))
+        self.max_retries = kwargs.get("max_retries", _safe_env_int("BINDPACK_OPENAI_MAX_RETRIES", 2))
 
         if self.global_config.azure_endpoint is None:
             self.openai_client = OpenAI(base_url=self.llm_base_url, http_client=client, max_retries=0)
@@ -331,7 +286,8 @@ class CacheOpenAI(BaseLLM):
             }
 
     def _init_llm_config(self) -> None:
-        config_dict = self.global_config.__dict__
+        config_dict = asdict(self.global_config)
+        config_dict["max_retries"] = self.global_config.max_retry_attempts
 
         config_dict['llm_name'] = self.global_config.llm_name
         config_dict['llm_base_url'] = self.global_config.llm_base_url

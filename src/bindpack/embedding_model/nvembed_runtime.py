@@ -3,7 +3,7 @@
 Only execution/storage changes: keep each encoded batch on CPU, disable the
 unused generation KV cache, and optionally split a batch after CUDA OOM.
 Text, token limit, instructions, dtype and normalization retain native values.
-Set PATHCONDRAG_NVEMBED_OOM_SPLIT=false to forbid any OOM batch splitting.
+Set BINDPACK_NVEMBED_OOM_SPLIT=false to forbid any OOM batch splitting.
 """
 
 from contextlib import contextmanager
@@ -23,12 +23,12 @@ RUNTIME_VERSION = 'nvembed_cpu_batch_storage_controlled_oom_split_v2'
 
 
 def _oom_split_enabled():
-    value = os.environ.get('PATHCONDRAG_NVEMBED_OOM_SPLIT', 'true').strip().lower()
+    value = os.environ.get('BINDPACK_NVEMBED_OOM_SPLIT', 'true').strip().lower()
     if value in {'1', 'true', 'yes', 'on'}:
         return True
     if value in {'0', 'false', 'no', 'off'}:
         return False
-    raise ValueError('PATHCONDRAG_NVEMBED_OOM_SPLIT must be true or false.')
+    raise ValueError('BINDPACK_NVEMBED_OOM_SPLIT must be true or false.')
 
 
 def _encode_cpu(model, texts, params, stats, allow_split):

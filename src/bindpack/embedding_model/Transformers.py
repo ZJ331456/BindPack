@@ -6,7 +6,7 @@ from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
 from .base import BaseEmbeddingModel
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..prompts.linking import get_query_instruction
 
 
@@ -18,7 +18,7 @@ class TransformersEmbeddingModel(BaseEmbeddingModel):
       Transformers//root/models/Qwen3-Embedding-8B
     """
 
-    def __init__(self, global_config: Optional[BaseConfig] = None, embedding_model_name: Optional[str] = None) -> None:
+    def __init__(self, global_config: Optional[RuntimeConfig] = None, embedding_model_name: Optional[str] = None) -> None:
         super().__init__(global_config=global_config)
 
         raw = embedding_model_name or self.embedding_model_name

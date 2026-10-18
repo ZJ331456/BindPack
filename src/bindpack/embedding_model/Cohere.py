@@ -7,7 +7,7 @@ import numpy as np
 from tqdm import tqdm
 
 from .base import BaseEmbeddingModel
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..prompts.linking import get_query_instruction
 
 
@@ -16,7 +16,7 @@ class CohereEmbeddingModel(BaseEmbeddingModel):
     To select this implementation you can initialise HippoRAG with:
         embedding_model_name="cohere.embed-english-v3"
     """
-    def __init__(self, global_config:BaseConfig, embedding_model_name:str) -> None:
+    def __init__(self, global_config:RuntimeConfig, embedding_model_name:str) -> None:
         super().__init__(global_config=global_config)
 
         self.model_id = embedding_model_name

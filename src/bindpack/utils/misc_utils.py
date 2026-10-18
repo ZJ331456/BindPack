@@ -7,7 +7,7 @@ import numpy as np
 import re
 import logging
 
-from .typing import Triple
+Triple = Tuple[str, str, str]
 from ..index.openie.openie_quality import validate_triples
 
 logger = logging.getLogger(__name__)

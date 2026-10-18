@@ -13,7 +13,7 @@ import multiprocessing
 
 
 from ..utils.logging_utils import get_logger
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 
 
 logger = get_logger(__name__)
@@ -187,16 +187,16 @@ def make_cache_embed(encode_func, cache_file_name, device):
     return wrapper
     
 class BaseEmbeddingModel:
-    global_config: BaseConfig
+    global_config: RuntimeConfig
     embedding_model_name: str # Class name indicating which embedding model to use.
     embedding_config: EmbeddingConfig
     
     embedding_dim: int # Need subclass to init
     
-    def __init__(self, global_config: Optional[BaseConfig] = None) -> None:
+    def __init__(self, global_config: Optional[RuntimeConfig] = None) -> None:
         if global_config is None: 
             logger.debug("global config is not given. Using the default ExperimentConfig instance.")
-            self.global_config = BaseConfig()
+            self.global_config = RuntimeConfig()
         else: self.global_config = global_config
         logger.debug(f"Loading {self.__class__.__name__} with global_config: {asdict(self.global_config)}")
         

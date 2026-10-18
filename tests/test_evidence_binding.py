@@ -1,20 +1,7 @@
 """Source identity and personal attribute helpers used by final DAG checks."""
-import importlib.util
-from pathlib import Path
-import sys
-from types import ModuleType
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ModuleType('_final_binding_test_package')
-PACKAGE.__path__ = [str(ROOT / 'src/bindpack')]
-sys.modules[PACKAGE.__name__] = PACKAGE
-SPEC = importlib.util.spec_from_file_location(
-    PACKAGE.__name__ + '.evidence.planning.evidence_binding',
-    ROOT / 'src/bindpack/evidence/planning/evidence_binding.py')
-module = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = module
-SPEC.loader.exec_module(module)
+from bindpack.stages.plan import answer_validation as module
 
 
 class SourceIdentityTests(unittest.TestCase):

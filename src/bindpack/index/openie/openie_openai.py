@@ -60,13 +60,13 @@ class OpenIE(OpenAINERMixin):
                 self.prompt_template_manager.templates[name] = self.prompt_template_manager.get_template('origin_' + name + '_prompt')
 
     def worker_limits(self) -> Tuple[int, int]:
-        """Resolve NER/triple limits; explicit config takes priority over legacy env."""
+        """Resolve NER/triple limits; explicit config takes priority over environment settings."""
         if not getattr(self, "respect_env_workers", True):
             return self.max_workers, self.max_workers
-        openie_workers = _safe_env_int('HIPPO_OPENIE_MAX_WORKERS', self.max_workers)
+        openie_workers = _safe_env_int('BINDPACK_OPENIE_MAX_WORKERS', self.max_workers)
         return (
-            _safe_env_int('HIPPO_OPENIE_NER_WORKERS', openie_workers),
-            _safe_env_int('HIPPO_OPENIE_TRIPLE_WORKERS', openie_workers),
+            _safe_env_int('BINDPACK_OPENIE_NER_WORKERS', openie_workers),
+            _safe_env_int('BINDPACK_OPENIE_TRIPLE_WORKERS', openie_workers),
         )
 
     def _triple_messages(self, passage, named_entities, error=None, previous_response=None,
@@ -234,7 +234,7 @@ class OpenIE(OpenAINERMixin):
                           repair_context: str = '', _allow_window_recovery: bool = True,
                           _support_source: str | None = None) -> TripleRawOutput:
         raw_response, metadata, retained = "", {}, []
-        triple_max_tokens = getattr(self, 'triple_max_tokens', _safe_env_int('HIPPO_OPENIE_TRIPLE_MAX_TOKENS', 2048))
+        triple_max_tokens = getattr(self, 'triple_max_tokens', _safe_env_int('BINDPACK_OPENIE_TRIPLE_MAX_TOKENS', 2048))
         attempt_settings, recovery_history, penalties = [], [], []
         attempt_count = length_count = length_retry_count = 0
         last_error = None
@@ -439,7 +439,7 @@ class OpenIE(OpenAINERMixin):
         ner_max_workers, triple_max_workers = self.worker_limits()
         logger.info(
             "Online OpenIE concurrency: NER workers=%d, triple workers=%d, "
-            "process HTTP ceiling=%d (PATHCONDRAG_LLM_MAX_IN_FLIGHT), legacy worker env=%s",
+            "process HTTP ceiling=%d (BINDPACK_LLM_MAX_IN_FLIGHT), worker environment settings=%s",
             ner_max_workers, triple_max_workers, LLM_MAX_IN_FLIGHT,
             "enabled" if getattr(self, "respect_env_workers", True) else "overridden by config",
         )

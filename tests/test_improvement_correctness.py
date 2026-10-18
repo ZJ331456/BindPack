@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from bindpack.retrieval.engine import BindPack
+from bindpack import BindPack, BindPackConfig
 from bindpack.utils.misc_utils import QuerySolution
 from bindpack.evaluation.result_export import detailed_result
 
@@ -13,8 +13,8 @@ from bindpack.evaluation.result_export import detailed_result
 class ImprovementCorrectnessTests(unittest.TestCase):
     def make_rag(self):
         rag = object.__new__(BindPack)
-        rag.pcrag_config = SimpleNamespace(improvement_stage=4, qd_cache_decompositions=False,
-                                         qd_llm_temperature=0.0)
+        rag.config = BindPackConfig()
+        rag.config.route.refinement.cache_decompositions = False
         rag.entity_embedding_store = SimpleNamespace(get_row=lambda key: {"content": "Alice Smith"})
         return rag
 
@@ -45,7 +45,7 @@ class ImprovementCorrectnessTests(unittest.TestCase):
     def test_top10_export_preserves_deep_candidates_and_gold_ranks(self):
         docs = [f"title\npassage {i}" for i in range(200)]
         scores = np.linspace(1, 0, 200)
-        solution = QuerySolution("q", docs, scores, retrieval_trace={"evidence": {"stage": 4}})
+        solution = QuerySolution("q", docs, scores, retrieval_trace={"evidence": {"stage_ablation": "full"}})
         row = detailed_result(solution, {"id": "4hop_x"}, 5, [docs[0], docs[8], docs[100]], 4)
         self.assertEqual(len(row["docs"]), 10)
         self.assertEqual(len(row["candidate_docs"]), 200)

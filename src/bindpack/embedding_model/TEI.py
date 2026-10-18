@@ -1,5 +1,5 @@
 """
-Hugging Face Text Embeddings Inference (TEI) client for HippoRAG / PCRAG.
+Hugging Face Text Embeddings Inference (TEI) client.
 
 Select this backend by setting embedding_model_name with a ``TEI/`` prefix, e.g.:
     embedding_model_name="TEI/e5-base-v2"
@@ -8,9 +8,9 @@ Select this backend by setting embedding_model_name with a ``TEI/`` prefix, e.g.
     embedding_base_url="http://127.0.0.1:8036"      # native TEI /embed
 
 Env overrides:
-    HIPPO_TEI_API_MODE=openai|native   (default: auto from base_url)
-    HIPPO_EMBEDDING_MAX_INPUT_TOKENS
-    HIPPO_EMBED_BATCH_RETRIES
+    BINDPACK_TEI_API_MODE=openai|native   (default: auto from base_url)
+    BINDPACK_EMBEDDING_MAX_INPUT_TOKENS
+    BINDPACK_EMBED_BATCH_RETRIES
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import torch
 from openai import OpenAI
 from tqdm import tqdm
 
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..utils.logging_utils import get_logger
 from .base import BaseEmbeddingModel, EmbeddingConfig
 
@@ -90,7 +90,7 @@ def _normalize_base_url(url: Optional[str]) -> str:
 
 
 def _detect_api_mode(base_url: str) -> str:
-    forced = os.environ.get("HIPPO_TEI_API_MODE", "").strip().lower()
+    forced = os.environ.get("BINDPACK_TEI_API_MODE", "").strip().lower()
     if forced in {"openai", "native"}:
         return forced
     path = urlparse(base_url).path.rstrip("/")
@@ -104,7 +104,7 @@ class TEIEmbeddingModel(BaseEmbeddingModel):
 
     def __init__(
         self,
-        global_config: Optional[BaseConfig] = None,
+        global_config: Optional[RuntimeConfig] = None,
         embedding_model_name: Optional[str] = None,
     ) -> None:
         super().__init__(global_config=global_config)
@@ -117,18 +117,18 @@ class TEIEmbeddingModel(BaseEmbeddingModel):
         self.api_mode = _detect_api_mode(self.base_url)
 
         self._init_embedding_config()
-        self.embedding_max_input_tokens = _safe_env_int("HIPPO_EMBEDDING_MAX_INPUT_TOKENS", 0)
+        self.embedding_max_input_tokens = _safe_env_int("BINDPACK_EMBEDDING_MAX_INPUT_TOKENS", 0)
         self._token_encoder = None
         self._token_encoder_loaded = False
         self._truncation_warning_count = 0
 
-        connect_timeout = _safe_env_float("HIPPO_HTTP_CONNECT_TIMEOUT_SEC", 20.0)
-        read_timeout = _safe_env_float("HIPPO_HTTP_READ_TIMEOUT_SEC", 300.0)
-        write_timeout = _safe_env_float("HIPPO_HTTP_WRITE_TIMEOUT_SEC", read_timeout)
-        pool_timeout = _safe_env_float("HIPPO_HTTP_POOL_TIMEOUT_SEC", 30.0)
-        max_retries = _safe_env_int("HIPPO_OPENAI_MAX_RETRIES", 2)
-        max_connections = _safe_env_int("HIPPO_HTTP_MAX_CONNECTIONS", 500)
-        max_keepalive = min(_safe_env_int("HIPPO_HTTP_MAX_KEEPALIVE", 100), max_connections)
+        connect_timeout = _safe_env_float("BINDPACK_HTTP_CONNECT_TIMEOUT_SEC", 20.0)
+        read_timeout = _safe_env_float("BINDPACK_HTTP_READ_TIMEOUT_SEC", 300.0)
+        write_timeout = _safe_env_float("BINDPACK_HTTP_WRITE_TIMEOUT_SEC", read_timeout)
+        pool_timeout = _safe_env_float("BINDPACK_HTTP_POOL_TIMEOUT_SEC", 30.0)
+        max_retries = _safe_env_int("BINDPACK_OPENAI_MAX_RETRIES", 2)
+        max_connections = _safe_env_int("BINDPACK_HTTP_MAX_CONNECTIONS", 500)
+        max_keepalive = min(_safe_env_int("BINDPACK_HTTP_MAX_KEEPALIVE", 100), max_connections)
 
         self.http_client = httpx.Client(
             limits=httpx.Limits(
@@ -181,7 +181,7 @@ class TEIEmbeddingModel(BaseEmbeddingModel):
         if self._token_encoder_loaded:
             return self._token_encoder
         self._token_encoder_loaded = True
-        encoding_name = os.environ.get("HIPPO_EMBEDDING_TIKTOKEN_ENCODING", "cl100k_base")
+        encoding_name = os.environ.get("BINDPACK_EMBEDDING_TIKTOKEN_ENCODING", "cl100k_base")
         try:
             import tiktoken
 
@@ -213,7 +213,7 @@ class TEIEmbeddingModel(BaseEmbeddingModel):
                     truncated += 1
                 output.append(text)
         else:
-            char_limit = _safe_env_int("HIPPO_EMBEDDING_MAX_INPUT_CHARS", max(1, token_limit * 3))
+            char_limit = _safe_env_int("BINDPACK_EMBEDDING_MAX_INPUT_CHARS", max(1, token_limit * 3))
             output = []
             for text in texts:
                 if len(text) > char_limit:
@@ -322,7 +322,7 @@ class TEIEmbeddingModel(BaseEmbeddingModel):
         else:
             pbar = tqdm(total=len(texts), desc="TEI Batch Encoding")
             results = []
-            max_attempts = _safe_env_int("HIPPO_EMBED_BATCH_RETRIES", 3)
+            max_attempts = _safe_env_int("BINDPACK_EMBED_BATCH_RETRIES", 3)
             for i in range(0, len(texts), batch_size):
                 batch = texts[i : i + batch_size]
                 last_error = None

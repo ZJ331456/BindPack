@@ -1,21 +1,15 @@
 """Final support guard and independent semantic veto without model services."""
 import copy
-import importlib
 import json
-from pathlib import Path
-import sys
 from types import ModuleType, SimpleNamespace
 import unittest
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ModuleType('_final_support_test_package')
-PACKAGE.__path__ = [str(ROOT / 'src/bindpack')]
-sys.modules[PACKAGE.__name__] = PACKAGE
-module = importlib.import_module(PACKAGE.__name__ + '.evidence.verification.evidence_support_semantic_veto')
-review = importlib.import_module(PACKAGE.__name__ + '.evidence.verification.evidence_review_prompt')
-selector = importlib.import_module(PACKAGE.__name__ + '.evidence.selection.evidence_typed_joint_selector')
+from bindpack import BindPackConfig
+from bindpack.stages.pack.verification import support_semantic_veto as module
+from bindpack.stages.pack.verification import review_prompt as review
+from bindpack.stages.pack import typed_joint_selector as selector
 QUERY = 'Where was the director of Aster Film born?'
 ROOT_QUOTE = 'Aster Film was directed by Alice Example.'
 CANDIDATE_QUOTE = 'Alice Example was born in Sample Town in 1960.'
@@ -60,8 +54,9 @@ def fixture(semantic=True, protect_victim=False, context_overflow=False, error=N
         bindings['s2'] = 'Another Town'
         proofs['s2'] = {'doc_id': 4, 'answer': 'Another Town', 'evidence': documents[4].partition('\n')[2]}
     trace = {'plan': plan, 'bindings': bindings, 'branch_scores': [{'bindings': bindings, 'proofs': proofs}]}
-    cfg = SimpleNamespace(llm_prefetch_workers=2, max_new_tokens=2048,
-                          evidence_review_context_length=8192, evidence_review_tokenizer='/unused/local/model')
+    cfg = BindPackConfig(llm_prefetch_workers=2, max_new_tokens=2048)
+    cfg.pack.review_context_length = 8192
+    cfg.pack.review_tokenizer = '/unused/local/model'
     llm = FakeLLM(semantic, error)
     rag = SimpleNamespace(llm_model=llm, _extract_llm_text=str)
     runtime = SimpleNamespace(cfg=cfg, rag=rag, _document=documents.__getitem__,

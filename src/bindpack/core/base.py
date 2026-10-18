@@ -23,7 +23,7 @@ from ..prompts.prompt_template_manager import PromptTemplateManager
 from ..retrieval.rerank import DSPyFilter
 from ..utils.misc_utils import *
 from ..utils.misc_utils import NerRawOutput, TripleRawOutput
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,8 @@ class BaseRAG(GraphIndexMixin):
         Initializes an instance of the class and its related components.
 
         Attributes:
-            global_config (BaseConfig): The global configuration settings for the instance. An instance
-                of BaseConfig is used if no value is provided.
+            global_config (RuntimeConfig): The global configuration settings for the instance. An instance
+                of RuntimeConfig is used if no value is provided.
             saving_dir (str): The directory where specific HippoRAG instances will be stored. This defaults
                 to `outputs` if no value is provided.
             llm_model (BaseLLM): The language model used for processing based on the global
@@ -67,7 +67,7 @@ class BaseRAG(GraphIndexMixin):
 
         Parameters:
             global_config: The global configuration object. Defaults to None, leading to initialization
-                of a new BaseConfig object.
+                of a new RuntimeConfig object.
             working_dir: The directory for storing working files. Defaults to None, constructing a default
                 directory based on the class name and timestamp.
             llm_model_name: LLM model name, can be inserted directly as well as through configuration file.
@@ -75,7 +75,7 @@ class BaseRAG(GraphIndexMixin):
             llm_base_url: LLM URL for a deployed LLM model, can be inserted directly as well as through configuration file.
         """
         if global_config is None:
-            self.global_config = BaseConfig()
+            self.global_config = RuntimeConfig()
         else:
             self.global_config = global_config
 
@@ -246,106 +246,6 @@ class BaseRAG(GraphIndexMixin):
         return diagnostics
 
 
-    def retrieve(self,
-                 queries: List[str],
-                 num_to_retrieve: int = None,
-                 gold_docs: List[List[str]] = None) -> List[QuerySolution] | Tuple[List[QuerySolution], Dict]:
-        """
-        Performs retrieval using the HippoRAG 2 framework, which consists of several steps:
-        - Fact Retrieval
-        - Recognition Memory for improved fact selection
-        - Dense passage scoring
-        - Personalized PageRank based re-ranking
-
-        Parameters:
-            queries: List[str]
-                A list of query strings for which documents are to be retrieved.
-            num_to_retrieve: int, optional
-                The maximum number of documents to retrieve for each query. If not specified, defaults to
-                the `retrieval_top_k` value defined in the global configuration.
-            gold_docs: List[List[str]], optional
-                A list of lists containing gold-standard documents corresponding to each query. Required
-                if retrieval performance evaluation is enabled (`do_eval_retrieval` in global configuration).
-
-        Returns:
-            List[QuerySolution] or (List[QuerySolution], Dict)
-                If retrieval performance evaluation is not enabled, returns a list of QuerySolution objects, each containing
-                the retrieved documents and their scores for the corresponding query. If evaluation is enabled, also returns
-                a dictionary containing the evaluation metrics computed over the retrieved results.
-
-        Notes
-        -----
-        - Long queries with no relevant facts after reranking will default to results from dense passage retrieval.
-        """
-        retrieve_start_time = time.time()  # Record start time
-        self.reset_retrieval_diagnostics()
-
-        if num_to_retrieve is None:
-            num_to_retrieve = self.global_config.retrieval_top_k
-
-        if gold_docs is not None:
-            retrieval_recall_evaluator = RetrievalRecall(global_config=self.global_config)
-
-        if not self.ready_to_retrieve:
-            self.prepare_retrieval_objects()
-
-        self.get_query_embeddings(queries)
-
-        retrieval_results = []
-
-        for q_idx, query in tqdm(enumerate(queries), desc="Retrieving", total=len(queries)):
-            rerank_start = time.time()
-            query_fact_scores = self.get_fact_scores(query)
-            top_k_fact_indices, top_k_facts, rerank_log = self.rerank_facts(query, query_fact_scores)
-            rerank_end = time.time()
-
-            self.rerank_time += rerank_end - rerank_start
-
-            if len(top_k_facts) == 0:
-                logger.info('No facts found after reranking, return DPR results')
-                sorted_doc_ids, sorted_doc_scores = self.dense_passage_retrieval(query)
-                self._record_retrieval_diagnostic(
-                    query_idx=q_idx,
-                    query=query,
-                    fallback_to_dpr=True,
-                    rerank_log=rerank_log,
-                )
-            else:
-                sorted_doc_ids, sorted_doc_scores = self.graph_search_with_fact_entities(query=query,
-                                                                                         link_top_k=self.global_config.linking_top_k,
-                                                                                         query_fact_scores=query_fact_scores,
-                                                                                         top_k_facts=top_k_facts,
-                                                                                         top_k_fact_indices=top_k_fact_indices,
-                                                                                         passage_node_weight=self.global_config.passage_node_weight)
-                self._record_retrieval_diagnostic(
-                    query_idx=q_idx,
-                    query=query,
-                    fallback_to_dpr=False,
-                    rerank_log=rerank_log,
-                )
-
-            top_k_docs = [self.chunk_embedding_store.get_row(self.passage_node_keys[idx])["content"] for idx in sorted_doc_ids[:num_to_retrieve]]
-
-            retrieval_results.append(QuerySolution(question=query, docs=top_k_docs, doc_scores=sorted_doc_scores[:num_to_retrieve]))
-
-        retrieve_end_time = time.time()  # Record end time
-
-        self.all_retrieval_time += retrieve_end_time - retrieve_start_time
-
-        logger.info(f"Total Retrieval Time {self.all_retrieval_time:.2f}s")
-        logger.info(f"Total Recognition Memory Time {self.rerank_time:.2f}s")
-        logger.info(f"Total PPR Time {self.ppr_time:.2f}s")
-        logger.info(f"Total Misc Time {self.all_retrieval_time - (self.rerank_time + self.ppr_time):.2f}s")
-
-        # Evaluate retrieval
-        if gold_docs is not None:
-            k_list = [1, 2, 5, 10, 20, 30, 50, 100, 150, 200]
-            overall_retrieval_result, example_retrieval_results = retrieval_recall_evaluator.calculate_metric_scores(gold_docs=gold_docs, retrieved_docs=[retrieval_result.docs for retrieval_result in retrieval_results], k_list=k_list)
-            logger.info(f"Evaluation results for retrieval: {overall_retrieval_result}")
-
-            return retrieval_results, overall_retrieval_result
-        else:
-            return retrieval_results
 
     def rag_qa(self,
                queries: List[str|QuerySolution],
@@ -421,150 +321,7 @@ class BaseRAG(GraphIndexMixin):
         else:
             return queries_solutions, all_response_message, all_metadata
 
-    def retrieve_dpr(self,
-                     queries: List[str],
-                     num_to_retrieve: int = None,
-                     gold_docs: List[List[str]] = None) -> List[QuerySolution] | Tuple[List[QuerySolution], Dict]:
-        """
-        Performs retrieval using a DPR framework, which consists of several steps:
-        - Dense passage scoring
 
-        Parameters:
-            queries: List[str]
-                A list of query strings for which documents are to be retrieved.
-            num_to_retrieve: int, optional
-                The maximum number of documents to retrieve for each query. If not specified, defaults to
-                the `retrieval_top_k` value defined in the global configuration.
-            gold_docs: List[List[str]], optional
-                A list of lists containing gold-standard documents corresponding to each query. Required
-                if retrieval performance evaluation is enabled (`do_eval_retrieval` in global configuration).
-
-        Returns:
-            List[QuerySolution] or (List[QuerySolution], Dict)
-                If retrieval performance evaluation is not enabled, returns a list of QuerySolution objects, each containing
-                the retrieved documents and their scores for the corresponding query. If evaluation is enabled, also returns
-                a dictionary containing the evaluation metrics computed over the retrieved results.
-
-        Notes
-        -----
-        - Long queries with no relevant facts after reranking will default to results from dense passage retrieval.
-        """
-        retrieve_start_time = time.time()  # Record start time
-
-        if num_to_retrieve is None:
-            num_to_retrieve = self.global_config.retrieval_top_k
-
-        if gold_docs is not None:
-            retrieval_recall_evaluator = RetrievalRecall(global_config=self.global_config)
-
-        if not self.ready_to_retrieve:
-            self.prepare_retrieval_objects()
-
-        self.get_query_embeddings(queries)
-
-        retrieval_results = []
-
-        for q_idx, query in tqdm(enumerate(queries), desc="Retrieving", total=len(queries)):
-            logger.info('No facts found after reranking, return DPR results')
-            sorted_doc_ids, sorted_doc_scores = self.dense_passage_retrieval(query)
-
-            top_k_docs = [self.chunk_embedding_store.get_row(self.passage_node_keys[idx])["content"] for idx in
-                          sorted_doc_ids[:num_to_retrieve]]
-
-            retrieval_results.append(
-                QuerySolution(question=query, docs=top_k_docs, doc_scores=sorted_doc_scores[:num_to_retrieve]))
-
-        retrieve_end_time = time.time()  # Record end time
-
-        self.all_retrieval_time += retrieve_end_time - retrieve_start_time
-
-        logger.info(f"Total Retrieval Time {self.all_retrieval_time:.2f}s")
-
-        # Evaluate retrieval
-        if gold_docs is not None:
-            k_list = [1, 2, 5, 10, 20, 30, 50, 100, 150, 200]
-            overall_retrieval_result, example_retrieval_results = retrieval_recall_evaluator.calculate_metric_scores(
-                gold_docs=gold_docs, retrieved_docs=[retrieval_result.docs for retrieval_result in retrieval_results],
-                k_list=k_list)
-            logger.info(f"Evaluation results for retrieval: {overall_retrieval_result}")
-
-            return retrieval_results, overall_retrieval_result
-        else:
-            return retrieval_results
-
-    def rag_qa_dpr(self,
-               queries: List[str|QuerySolution],
-               gold_docs: List[List[str]] = None,
-               gold_answers: List[List[str]] = None) -> Tuple[List[QuerySolution], List[str], List[Dict]] | Tuple[List[QuerySolution], List[str], List[Dict], Dict, Dict]:
-        """
-        Performs retrieval-augmented generation enhanced QA using a standard DPR framework.
-
-        This method can handle both string-based queries and pre-processed QuerySolution objects. Depending
-        on its inputs, it returns answers only or additionally evaluate retrieval and answer quality using
-        recall @ k, exact match and F1 score metrics.
-
-        Parameters:
-            queries (List[Union[str, QuerySolution]]): A list of queries, which can be either strings or
-                QuerySolution instances. If they are strings, retrieval will be performed.
-            gold_docs (Optional[List[List[str]]]): A list of lists containing gold-standard documents for
-                each query. This is used if document-level evaluation is to be performed. Default is None.
-            gold_answers (Optional[List[List[str]]]): A list of lists containing gold-standard answers for
-                each query. Required if evaluation of question answering (QA) answers is enabled. Default
-                is None.
-
-        Returns:
-            Union[
-                Tuple[List[QuerySolution], List[str], List[Dict]],
-                Tuple[List[QuerySolution], List[str], List[Dict], Dict, Dict]
-            ]: A tuple that always includes:
-                - List of QuerySolution objects containing answers and metadata for each query.
-                - List of response messages for the provided queries.
-                - List of metadata dictionaries for each query.
-                If evaluation is enabled, the tuple also includes:
-                - A dictionary with overall results from the retrieval phase (if applicable).
-                - A dictionary with overall QA evaluation metrics (exact match and F1 scores).
-
-        """
-        if gold_answers is not None:
-            qa_em_evaluator = QAExactMatch(global_config=self.global_config)
-            qa_f1_evaluator = QAF1Score(global_config=self.global_config)
-
-        # Retrieving (if necessary)
-        overall_retrieval_result = None
-
-        if not isinstance(queries[0], QuerySolution):
-            if gold_docs is not None:
-                queries, overall_retrieval_result = self.retrieve_dpr(queries=queries, gold_docs=gold_docs)
-            else:
-                queries = self.retrieve_dpr(queries=queries)
-
-        # Performing QA
-        queries_solutions, all_response_message, all_metadata = self.qa(queries)
-
-        # Evaluating QA
-        if gold_answers is not None:
-            overall_qa_em_result, example_qa_em_results = qa_em_evaluator.calculate_metric_scores(
-                gold_answers=gold_answers, predicted_answers=[qa_result.answer for qa_result in queries_solutions],
-                aggregation_fn=np.max)
-            overall_qa_f1_result, example_qa_f1_results = qa_f1_evaluator.calculate_metric_scores(
-                gold_answers=gold_answers, predicted_answers=[qa_result.answer for qa_result in queries_solutions],
-                aggregation_fn=np.max)
-
-            # round off to 4 decimal places for QA results
-            overall_qa_em_result.update(overall_qa_f1_result)
-            overall_qa_results = overall_qa_em_result
-            overall_qa_results = {k: round(float(v), 4) for k, v in overall_qa_results.items()}
-            logger.info(f"Evaluation results for QA: {overall_qa_results}")
-
-            # Save retrieval and QA results
-            for idx, q in enumerate(queries_solutions):
-                q.gold_answers = list(gold_answers[idx])
-                if gold_docs is not None:
-                    q.gold_docs = gold_docs[idx]
-
-            return queries_solutions, all_response_message, all_metadata, overall_retrieval_result, overall_qa_results
-        else:
-            return queries_solutions, all_response_message, all_metadata
 
     def qa(self, queries: List[QuerySolution]) -> Tuple[List[QuerySolution], List[str], List[Dict]]:
         """
@@ -869,158 +626,7 @@ class BaseRAG(GraphIndexMixin):
         return sorted_doc_ids, sorted_doc_scores
 
 
-    def get_top_k_weights(self,
-                          link_top_k: int,
-                          all_phrase_weights: np.ndarray,
-                          linking_score_map: Dict[str, float]) -> Tuple[np.ndarray, Dict[str, float]]:
-        """
-        This function filters the all_phrase_weights to retain only the weights for the
-        top-ranked phrases in terms of the linking_score_map. It also filters linking scores
-        to retain only the top `link_top_k` ranked nodes. Non-selected phrases in phrase
-        weights are reset to a weight of 0.0.
 
-        Args:
-            link_top_k (int): Number of top-ranked nodes to retain in the linking score map.
-            all_phrase_weights (np.ndarray): An array representing the phrase weights, indexed
-                by phrase ID.
-            linking_score_map (Dict[str, float]): A mapping of phrase content to its linking
-                score, sorted in descending order of scores.
-
-        Returns:
-            Tuple[np.ndarray, Dict[str, float]]: A tuple containing the filtered array
-            of all_phrase_weights with unselected weights set to 0.0, and the filtered
-            linking_score_map containing only the top `link_top_k` phrases.
-        """
-        # choose top ranked nodes in linking_score_map
-        linking_score_map = dict(sorted(linking_score_map.items(), key=lambda x: x[1], reverse=True)[:link_top_k])
-
-        # only keep the top_k phrases in all_phrase_weights
-        top_k_phrases = set(linking_score_map.keys())
-        top_k_phrases_keys = set(
-            [compute_mdhash_id(content=top_k_phrase, prefix="entity-") for top_k_phrase in top_k_phrases])
-
-        for phrase_key in self.node_name_to_vertex_idx:
-            if phrase_key not in top_k_phrases_keys:
-                phrase_id = self.node_name_to_vertex_idx.get(phrase_key, None)
-                if phrase_id is not None:
-                    all_phrase_weights[phrase_id] = 0.0
-
-        assert np.count_nonzero(all_phrase_weights) == len(linking_score_map.keys())
-        return all_phrase_weights, linking_score_map
-
-    def graph_search_with_fact_entities(self, query: str,
-                                        link_top_k: int,
-                                        query_fact_scores: np.ndarray,
-                                        top_k_facts: List[Tuple],
-                                        top_k_fact_indices: List[str],
-                                        passage_node_weight: float = 0.05) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Computes document scores based on fact-based similarity and relevance using personalized
-        PageRank (PPR) and dense retrieval models. This function combines the signal from the relevant
-        facts identified with passage similarity and graph-based search for enhanced result ranking.
-
-        Parameters:
-            query (str): The input query string for which similarity and relevance computations
-                need to be performed.
-            link_top_k (int): The number of top phrases to include from the linking score map for
-                downstream processing.
-            query_fact_scores (np.ndarray): An array of scores representing fact-query similarity
-                for each of the provided facts.
-            top_k_facts (List[Tuple]): A list of top-ranked facts, where each fact is represented
-                as a tuple of its subject, predicate, and object.
-            top_k_fact_indices (List[str]): Corresponding indices or identifiers for the top-ranked
-                facts in the query_fact_scores array.
-            passage_node_weight (float): Default weight to scale passage scores in the graph.
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray]: A tuple containing two arrays:
-                - The first array corresponds to document IDs sorted based on their scores.
-                - The second array consists of the PPR scores associated with the sorted document IDs.
-        """
-
-        #Assigning phrase weights based on selected facts from previous steps.
-        linking_score_map = {}  # from phrase to the average scores of the facts that contain the phrase
-        phrase_scores = {}  # store all fact scores for each phrase regardless of whether they exist in the knowledge graph or not
-        phrase_weights = np.zeros(len(self.graph.vs['name']))
-        passage_weights = np.zeros(len(self.graph.vs['name']))
-        number_of_occurs = np.zeros(len(self.graph.vs['name']))
-
-        phrases_and_ids = set()
-
-        for rank, f in enumerate(top_k_facts):
-            subject_phrase = f[0].lower()
-            predicate_phrase = f[1].lower()
-            object_phrase = f[2].lower()
-            fact_score = query_fact_scores[
-                top_k_fact_indices[rank]] if query_fact_scores.ndim > 0 else query_fact_scores
-
-            for phrase in [subject_phrase, object_phrase]:
-                phrase_key = compute_mdhash_id(
-                    content=phrase,
-                    prefix="entity-"
-                )
-                phrase_id = self.node_name_to_vertex_idx.get(phrase_key, None)
-
-                if phrase_id is not None:
-                    weighted_fact_score = fact_score
-
-                    if len(self.ent_node_to_chunk_ids.get(phrase_key, set())) > 0:
-                        weighted_fact_score /= len(self.ent_node_to_chunk_ids[phrase_key])
-
-                    phrase_weights[phrase_id] += weighted_fact_score
-                    number_of_occurs[phrase_id] += 1
-
-                phrases_and_ids.add((phrase, phrase_id))
-
-        phrase_weights /= number_of_occurs
-
-        for phrase, phrase_id in phrases_and_ids:
-            if phrase not in phrase_scores:
-                phrase_scores[phrase] = []
-
-            phrase_scores[phrase].append(phrase_weights[phrase_id])
-
-        # calculate average fact score for each phrase
-        for phrase, scores in phrase_scores.items():
-            linking_score_map[phrase] = float(np.mean(scores))
-
-        if link_top_k:
-            phrase_weights, linking_score_map = self.get_top_k_weights(link_top_k,
-                                                                           phrase_weights,
-                                                                           linking_score_map)  # at this stage, the length of linking_scope_map is determined by link_top_k
-
-        #Get passage scores according to chosen dense retrieval model
-        dpr_sorted_doc_ids, dpr_sorted_doc_scores = self.dense_passage_retrieval(query)
-        normalized_dpr_sorted_scores = min_max_normalize(dpr_sorted_doc_scores)
-
-        for i, dpr_sorted_doc_id in enumerate(dpr_sorted_doc_ids.tolist()):
-            passage_node_key = self.passage_node_keys[dpr_sorted_doc_id]
-            passage_dpr_score = normalized_dpr_sorted_scores[i]
-            passage_node_id = self.node_name_to_vertex_idx[passage_node_key]
-            passage_weights[passage_node_id] = passage_dpr_score * passage_node_weight
-            passage_node_text = self.chunk_embedding_store.get_row(passage_node_key)["content"]
-            linking_score_map[passage_node_text] = passage_dpr_score * passage_node_weight
-
-        #Combining phrase and passage scores into one array for PPR
-        node_weights = phrase_weights + passage_weights
-
-        #Recording top 30 facts in linking_score_map
-        if len(linking_score_map) > 30:
-            linking_score_map = dict(sorted(linking_score_map.items(), key=lambda x: x[1], reverse=True)[:30])
-
-        assert sum(node_weights) > 0, f'No phrases found in the graph for the given facts: {top_k_facts}'
-
-        #Running PPR algorithm based on the passage and phrase weights previously assigned
-        ppr_start = time.time()
-        ppr_sorted_doc_ids, ppr_sorted_doc_scores = self.run_ppr(node_weights, damping=self.global_config.damping)
-        ppr_end = time.time()
-
-        self.ppr_time += (ppr_end - ppr_start)
-
-        assert len(ppr_sorted_doc_ids) == len(
-            self.passage_node_idxs), f"Doc prob length {len(ppr_sorted_doc_ids)} != corpus length {len(self.passage_node_idxs)}"
-
-        return ppr_sorted_doc_ids, ppr_sorted_doc_scores
 
 
     def rerank_facts(self, query: str, query_fact_scores: np.ndarray) -> Tuple[List[int], List[Tuple], dict]:

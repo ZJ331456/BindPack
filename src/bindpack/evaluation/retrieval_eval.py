@@ -4,7 +4,7 @@ import numpy as np
 
 from .base import BaseMetric
 from ..utils.logging_utils import get_logger
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 
 
 
@@ -17,7 +17,7 @@ class RetrievalRecall(BaseMetric):
     
     metric_name: str = "retrieval_recall"
     
-    def __init__(self, global_config: Optional[BaseConfig] = None):
+    def __init__(self, global_config: Optional[RuntimeConfig] = None):
         super().__init__(global_config)
         
     

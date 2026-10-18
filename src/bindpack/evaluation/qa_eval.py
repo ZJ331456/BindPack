@@ -4,7 +4,7 @@ import numpy as np
 
 from .base import BaseMetric
 from ..utils.logging_utils import get_logger
-from ..utils.config_utils import BaseConfig
+from ..configuration.runtime import RuntimeConfig
 from ..utils.eval_utils import normalize_answer
 
 logger = get_logger(__name__)
@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 class QAExactMatch(BaseMetric):
     metric_name: str = "qa_exact_match"
 
-    def __init__(self, global_config: Optional[BaseConfig] = None):
+    def __init__(self, global_config: Optional[RuntimeConfig] = None):
         super().__init__(global_config)
 
     def calculate_metric_scores(self, gold_answers: List[List[str]], predicted_answers: List[str], aggregation_fn: Callable = np.max) -> Tuple[Dict[str, float], List[Dict[str, float]]]:
@@ -49,7 +49,7 @@ class QAExactMatch(BaseMetric):
 class QAF1Score(BaseMetric):
     metric_name: str = "qa_f1_score"
 
-    def __init__(self, global_config: Optional[BaseConfig] = None):
+    def __init__(self, global_config: Optional[RuntimeConfig] = None):
         super().__init__(global_config)
 
     def calculate_metric_scores(self, gold_answers: List[List[str]], predicted_answers: List[str], aggregation_fn: Callable = np.max) -> Tuple[Dict[str, float], List[Dict[str, float]]]:

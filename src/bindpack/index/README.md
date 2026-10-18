@@ -27,7 +27,7 @@
 
 ## 失败策略与提示词
 
-构建入口可以追加以下参数，`eval_dataset.py` 和新索引对比脚本也支持它们：
+构建入口可以追加以下参数，`eval_dataset.py` 也支持这些资源/发布参数：
 
 ```bash
 --openie_validation_mode structural --openie_strict true --openie_prompt_version optimized
@@ -38,7 +38,7 @@
   为空；只含空白的原文可由本地检查确认为空。**结构合法不代表关系语义正确。**
 - `openie_validation_mode=source_verified`：额外执行独立原文证据与角色核验；失败时
   可以进入 compact、atomic 等恢复策略。适用于需要额外核验且接受较高成本的构建。
-- `openie_strict=true`（默认）：要求所有 chunk 满足所选模式的完成合同，失败则
+- `openie_strict=true`（独立 `build_shared_index.py` 默认）：要求所有 chunk 满足所选模式的完成合同，失败则
   保存诊断并中止图发布；它不自动切换为 `source_verified`，也不保证 LLM 无语义错误。
 - `openie_strict=false`：所选模式的抽取和重试规则保持一致，最终失败会警告并记录统计，
   对应 chunk 的文本和向量保留，未通过检查的关系不入图，继续完成索引。
@@ -48,6 +48,8 @@
 - `openie_prompt_version=optimized`（默认）：使用优化后的 `ner.py` 和
   `triple_extraction.py`。`origin` 指本项目优化前版本，不是承诺与原生 HippoRAG
   提示词完全相同。
+
+当前四组实验的默认方法/资源配置使用 `openie_strict=false`，以 `configs/ablations_qwen3.json` 的有效设置为准；独立共享索引构建器保留显式严格发布的默认值。
 
 验证模式与失败发布策略相互独立。模式、失败策略、所选提示词和提示词哈希写入质量身份。
 变更后应在独立目录重建索引，或执行有备份、有记录的显式检查点迁移，

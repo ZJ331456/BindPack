@@ -1,3 +1,4 @@
+from dataclasses import asdict
 import os
 from typing import List, Tuple
 from copy import deepcopy
@@ -82,7 +83,7 @@ class BedrockLLM(BaseLLM):
         logger.info(f"[BedrockLLM] Model-ID: {self.global_config.llm_name}, Cache: {self.cache.cache_filepath}")
 
     def _init_llm_config(self) -> None:
-        config_dict = self.global_config.__dict__
+        config_dict = asdict(self.global_config)
         config_dict['llm_name'] = self.global_config.llm_name
         config_dict['generate_params'] = {
                 "model": self.global_config.llm_name,

@@ -19,7 +19,7 @@ class OpenAINERMixin:
         raw_response = ""
         metadata = {}
         # Align with HippoRAG: default 512, escalate to 1024 on parse failure or truncation.
-        ner_max_tokens = getattr(self, 'ner_max_tokens', _safe_env_int('HIPPO_OPENIE_NER_MAX_TOKENS', 512))
+        ner_max_tokens = getattr(self, 'ner_max_tokens', _safe_env_int('BINDPACK_OPENIE_NER_MAX_TOKENS', 512))
         token_budgets = [ner_max_tokens]
         if ner_max_tokens < 1024:
             token_budgets.append(1024)
