@@ -1,10 +1,8 @@
-# Track current method/run documentation; keep historical reports local.
+# Keep the three maintained research documents.
 /docs/*
-!/docs/模块组合-消融说明.md
-!/docs/四组实验-Qwen3.md
-!/docs/三阶段重构验证_2026-10-18.md
-!/docs/项目最终检查_2026-10-18.md
-!/docs/新指标说明.md
+!/docs/实验图表.md
+!/docs/指标说明.md
+!/docs/Baseline说明.md
 /outputs/
 
 # Python

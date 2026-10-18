@@ -19,7 +19,7 @@ bindpack/
 ├── core/                      模型初始化、dense retrieval 与 reader
 ├── storage/                   向量/文本存储
 ├── embedding_model/、llm/     模型适配与请求缓存
-└── evaluation/                检索与 QA 指标
+└── evaluation/                检索、QA、独立 gold 图与 FCR/DCC 报告
 ```
 
 Plan 使用初始 base 和 QD/PCQD 的独立 DPR 候选，在最终 Route fusion/path-set 以前执行；Pack 结合最终 Route 排名和 Plan state。目录整理保留这条原 Full 执行关系。
@@ -42,8 +42,6 @@ rag = BindPack(config=cfg)
 | `wo_plan` | 不生成/执行依赖 DAG、绑定或 proof；Route + flat coverage/redundancy Pack |
 | `wo_pack` | Route/Plan 保持，仅 base/goal pointwise；无 greedy、DAG 和 final safeguard |
 
-`wo_route` 不是外部 HippoRAG2 的独立复现，`wo_plan` 不具有完整 DAG Pack。Qwen embedding 使用独立新索引。`retrieve` 只有检索指标，`rag_qa` 才有 reader QA 指标。
+`wo_route` 是项目内的基础候选适配器，外部 HippoRAG2 使用独立入口；`wo_plan` 跳过依赖 DAG package。Qwen embedding 必须使用与模型、语料和建库身份匹配的索引，可以复用已核验的 Qwen 索引。`retrieve` 输出检索指标，`rag_qa` 同时执行 reader；FCR/DCC 在结果保存后独立计算。
 
-完整机制与边界见 [模块说明](../../docs/模块组合-消融说明.md)，运行方法见 [四组实验](../../docs/四组实验-Qwen3.md)。
-
-本轮验证见 [第二轮重构验证（2026-10-18）](../../docs/三阶段重构验证_2026-10-18.md)。
+阶段定义、实验设计、配置和运行命令见 [实验图表](../../docs/实验图表.md)，FCR/DCC 与报告协议见 [指标说明](../../docs/指标说明.md)，各对照方法及论文出处见 [Baseline 说明](../../docs/Baseline说明.md)。

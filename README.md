@@ -48,11 +48,9 @@ tail -f /root/BindPack/outputs/3multi_hop_datasets_results_10_5/logs/run_bindpac
 python scripts/report_metrics.py --cases-root outputs/3multi_hop_datasets_results_10_5/cases
 ```
 
-MuSiQue 可计算 DCC；HotpotQA/2Wiki 缺少可信 gold DAG 时为 `null` 并注明原因。定义、来源与自动补算见 [指标说明](docs/新指标说明.md)。
+MuSiQue 可计算 DCC；HotpotQA/2Wiki 缺少可信 gold DAG 时为 `null` 并注明原因。定义、来源与自动补算见 [指标说明](docs/指标说明.md)。
 
-- [四组实验运行与服务准备](docs/四组实验-Qwen3.md)
+- [实验图表、消融设计与运行协议](docs/实验图表.md)
+- [指标定义与离线报告](docs/指标说明.md)
+- [Baseline 分类、论文出处与公平比较](docs/Baseline说明.md)
 - [源码结构与配置](src/bindpack/README.md)
-- [模块机制、消融定义与边界](docs/模块组合-消融说明.md)
-
-本轮验证见 [第二轮重构验证（2026-10-18）](docs/三阶段重构验证_2026-10-18.md)。
-最后检查与旧 Qwen 索引复用范围见 [最终检查说明](docs/项目最终检查_2026-10-18.md)。
