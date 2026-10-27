@@ -1,5 +1,6 @@
 {
   "runtime": {
+    "mechanism_ablation": "full",
     "llm_name": "qwen3-8b",
     "embedding_model_name": "/root/models/Qwen3-Embedding-8B",
     "llm_base_url": "http://127.0.0.1:8035/v1",

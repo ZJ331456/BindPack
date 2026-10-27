@@ -34,6 +34,11 @@ def parser():
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--case", choices=['full','wo_route','wo_plan','wo_pack'], default='full')
+    p.add_argument("--mechanism-ablation", choices=['full','wo_source_bound_eligibility',
+        'wo_dependency_closure','wo_joint_selection'], default='full')
+    p.add_argument("--eval-mode", choices=['rag_qa','retrieve'], default='rag_qa')
+    p.add_argument("--candidate-output-top-k",type=int,default=200,
+                   help='Text export prefix; complete passage hashes and gold ranks are retained')
     p.add_argument("--reuse-index", help="completed Full case's index; independent graph/vector copy, empty LLM cache")
     p.add_argument("--reuse-archive-index", help="verified archive/shared_indexes/<dataset>; no rebuilding or historical query cache")
     p.add_argument("--query-limit", type=int, help="development check on a full archived corpus; preserve native hop/label diversity")
@@ -73,6 +78,8 @@ def freeze_worker(args):
     if args.reuse_archive_index: argv += ['--reuse-archive-index',str(Path(args.reuse_archive_index).resolve())]
     if args.query_limit is not None: argv += ['--query-limit',str(args.query_limit)]
     argv += ['--query-window',str(args.query_window)]
+    argv += ['--mechanism-ablation',args.mechanism_ablation,'--eval-mode',args.eval_mode]
+    argv += ['--candidate-output-top-k',str(args.candidate_output_top_k)]
     os.execv(sys.executable, argv)
 
 
@@ -91,6 +98,7 @@ def run(args):
 
     output = Path(args.output).resolve()
     stage = args.case
+    if not 5<=args.candidate_output_top_k<=200:raise ValueError('candidate-output-top-k must be 5..200')
     case = output / "cases" / args.dataset / stage
     metadata = output / "metadata" / args.dataset
     case.mkdir(parents=True, exist_ok=True)
@@ -169,7 +177,8 @@ def run(args):
         "openie_max_workers", "llm_prefetch_workers", "max_new_tokens", "openie_strict",
         "openie_prompt_version", "openie_validation_mode")}
     config = BindPackConfig.from_file(method, **overrides, save_dir=str(case/'index'), dataset=args.dataset,
-        corpus_len=len(docs), stage_ablation=stage, retrieval_top_k=200, qa_top_k=5, max_qa_steps=1)
+        corpus_len=len(docs), stage_ablation=stage, retrieval_top_k=200, qa_top_k=5, max_qa_steps=1,
+        mechanism_ablation=args.mechanism_ablation)
     protocol = dict(schema_version=1, mode="smoke" if args.smoke or args.query_limit is not None else "full", method="bindpack", stage_ablation=stage,
         dataset=identity, configuration=asdict(config), models=model_identity, source=sources,
         query_concurrency=args.query_window, native_llm_concurrency=8, embedding_batch_size=4,
@@ -177,6 +186,9 @@ def run(args):
         hop_condition="oracle native benchmark hops, recorded explicitly; no gold documents/answers passed to retrieval",
         reader_policy="native prompt/parser; reader@5; baseline-compatible 8192 input+output prefix budget",
         resources="2s samples; CPU process/tree; whole shared GPU utilization/memory/power; no exclusive GPU attribution")
+    protocol.update(mechanism_ablation=args.mechanism_ablation,eval_mode=args.eval_mode,
+        candidate_output_top_k=args.candidate_output_top_k,
+        qa_executed=args.eval_mode=='rag_qa',upstream_policy='fresh native Route and Plan; no historical model responses')
     if args.reuse_index:
         protocol['index_reuse'] = dict(source=str(Path(args.reuse_index).resolve()),
             policy='private graph/vector/OpenIE copy; no Full or cross-ablation LLM/query caches')
@@ -255,6 +267,9 @@ def run(args):
                 from bindpack.llm.openai_gpt import CacheOpenAI
                 recorder.install_llm_factory(CacheOpenAI,tokenizer)
                 rag=BindPack(config=config)
+                if args.eval_mode=='retrieve':
+                    def deny_qa(*a,**kw):raise AssertionError('Final QA generation is disabled in this experiment')
+                    rag.qa=deny_qa
                 recorder.install_embedding(rag.embedding_model)
                 recorder.install_index(rag)
                 if args.reuse_archive_index:
@@ -295,22 +310,31 @@ def run(args):
             for i,solution,retrieval_timing in stream:
                 if requested_stop.is_set():raise KeyboardInterrupt('Stopped at a durable query boundary; all prior costs/checkpoints retained')
                 sample=samples[i];qid=identity['sample_ids'][i];query=get_query_text(sample,args.dataset)
-                with recorder.section('online_reader',qid):
+                with recorder.section('online_reader' if args.eval_mode=='rag_qa' else 'budget_preparation',qid):
                     reading_start=time.perf_counter()
                     reader_solution,budget=prepare(rag,solution,tokenizer,args.dataset)
-                    answered,raw,metas=rag.qa([reader_solution])
-                    solution.answer=answered[0].answer
-                    reading_seconds=time.perf_counter()-reading_start
+                    if args.eval_mode=='rag_qa':
+                        answered,raw,metas=rag.qa([reader_solution])
+                        solution.answer=answered[0].answer
+                        reading_seconds=time.perf_counter()-reading_start
+                    else:
+                        solution.answer=None
+                        raw,metas=[None],[{'finish_reason':None,'qa_executed':False}]
+                        reading_seconds=0.0
+                    budget_seconds=time.perf_counter()-reading_start if args.eval_mode=='retrieve' else 0.0
                 serial=retrieval_timing['execution_mode']=='serial'
                 retrieval_seconds=retrieval_timing.get('retrieval_seconds')
-                elapsed=retrieval_seconds+reading_seconds if serial else None
+                elapsed=retrieval_seconds+reading_seconds+budget_seconds if serial else None
                 solution.gold_answers=get_gold_answers([sample],args.dataset)[0]
                 solution.gold_docs=gold[i]
-                row=detailed_result(solution,sample,indices[i],gold[i],hops_all[indices[i]],10,200)
-                row.update(ranking_complete=True,actual_ranking_length=len(solution.docs),
+                row=detailed_result(solution,sample,indices[i],gold[i],hops_all[indices[i]],10,args.candidate_output_top_k)
+                row.update(ranking_complete=len(row['candidate_docs'])==len(solution.docs),actual_ranking_length=len(solution.docs),
                     timing=dict(end_to_end_seconds=elapsed,retrieval_seconds=retrieval_seconds,
                         reader_seconds=reading_seconds,**{k:v for k,v in retrieval_timing.items() if k!='retrieval_seconds'}),
                     reader=dict(raw_response=raw[0],metadata=metas[0],budget=budget))
+                if args.eval_mode=='retrieve':row['timing']['budget_preparation_seconds']=budget_seconds
+                if args.candidate_output_top_k<200:
+                    row['complete_ranking_content_sha256']=[hashlib.sha256(d.encode()).hexdigest() for d in solution.docs]
                 row=json.loads(json.dumps(row,ensure_ascii=False,allow_nan=False))
                 recorder.append('progress.jsonl',dict(sha256=digest(row),row=row))
                 rows.append(row)
@@ -327,8 +351,21 @@ def run(args):
         selected=[r['retrieval_trace'].get('evidence',{}).get('budgeted_selection',{}) for r in rows]
         profile['efficiency']['budgeted_selector_seconds']=distribution(d['seconds'] for d in selected if d.get('enabled'))
         profile['efficiency']['budgeted_selector_scope']='feature preparation, bounded search and reader visibility; excludes current-Pack reference S0 construction, Route/Plan and generation'
-        profile['cost']['budgeted_selector']=dict(enabled=config.pack_enabled and config.pack.selector_mode!='current',
+        profile['cost']['budgeted_selector']=dict(enabled=config.pack_enabled and config.pack.selector_mode!='current' and
+            config.mechanism_ablation!='wo_joint_selection',
             llm_calls=sum(d.get('model_requests',0) for d in selected),embedding_calls=0)
+        profile['measurement_protocol'].update(mechanism_ablation=config.mechanism_ablation,
+            qa_executed=args.eval_mode=='rag_qa',upstream_reexecuted=True)
+        if args.eval_mode=='retrieve':
+            profile['evidence_budget']['scope']='Prepared Reader@5 context only; final QA was not executed'
+            for name in ('actual_passages','evidence_tokens','prompt_tokens'):
+                profile['evidence_budget']['prepared_'+name]=profile['evidence_budget'].pop(name)
+            profile['evidence_budget']['reader_executed']=False
+            profile['efficiency']['budget_preparation_seconds']=distribution(r['timing']['budget_preparation_seconds'] for r in rows)
+            prep=sum(r['timing']['budget_preparation_seconds'] for r in rows)
+            if args.query_window>1:
+                profile['efficiency']['completed_query_processing_wall_seconds']+=prep
+                profile['efficiency']['processing_seconds_per_query']=profile['efficiency']['completed_query_processing_wall_seconds']/len(rows)
         profile['cost']['support_semantic_veto']=dict(mode=config.pack.review_mode,
             enabled=config.pack_enabled and config.pack.review_mode!='off',
             logical_extra_requests=sum(d.get('extra_requests',0) for d in reviews),
@@ -347,7 +384,8 @@ def run(args):
                 original_build_cost_scope=reused['original_build_unavailable_reason'])
             profile['cost']['shared_original_index']=reused['original_build_usage']
             profile['cost']['shared_original_index_scope']=reused['original_build_unavailable_reason']
-        result=dict(dataset=args.dataset,method='bindpack',stage_ablation=stage,eval_mode='rag_qa',
+        result=dict(dataset=args.dataset,method='bindpack',stage_ablation=stage,eval_mode=args.eval_mode,
+            mechanism_ablation=config.mechanism_ablation,qa_executed=args.eval_mode=='rag_qa',
             data_path=str(data_path),corpus_path=str(metadata/'corpus.json'),selected_indices=indices,
             sample_size_effective=len(rows),runtime_config=asdict(config),retrieval_metrics={},qa_metrics={},
             hop_provenance=identity['hop_provenance'],hop_distribution=dict(Counter(str(hops_all[i]) for i in indices)),
@@ -356,6 +394,7 @@ def run(args):
         write_json(case/'validated.ok',dict(result_sha256=sha256(case/'result.json'),protocol_sha256=digest(protocol)))
         report=write_metric_report(case/'result.json',manifest_path=metadata/'sample_manifest.json',ks=[3,5,8,10,20,200])
         report.update(profile)
+        report.update(mechanism_ablation=config.mechanism_ablation,qa_executed=args.eval_mode=='rag_qa')
         report['display_metrics']={k:'N/A' if v is None else v for k,v in report['metrics'].items()}
         write_json(case/'report.json',report)
         audit=validate(case,rows,profile)
@@ -443,20 +482,24 @@ def validate(case,rows,profile):
     assert profile['cost']['online']==usage([e for e in events if e['phase'].startswith('online_')])
     assert profile['cost']['offline_index']==usage([e for e in events if e['phase']=='offline_index'])
     readers=[e for e in logical if e['phase']=='online_reader' and e['status']=='success']
-    assert set(r['sample_id'] for r in rows)==set(e['query_id'] for e in readers)
-    for row in rows:
-        last = next(e for e in reversed(readers) if e['query_id']==row['sample_id'])
-        assert last['prompt_sha256']==row['reader']['budget']['prompt_sha256']
-        assert last['metadata']==row['reader']['metadata']
+    protocol=json.loads((case/'protocol.json').read_text())
+    if protocol.get('qa_executed',True):
+        assert set(r['sample_id'] for r in rows)==set(e['query_id'] for e in readers)
+        for row in rows:
+            last = next(e for e in reversed(readers) if e['query_id']==row['sample_id'])
+            assert last['prompt_sha256']==row['reader']['budget']['prompt_sha256']
+            assert last['metadata']==row['reader']['metadata']
+    else:
+        assert not readers and not any(e['phase']=='online_reader' for e in events)
+        assert all(r['reader']['metadata'].get('qa_executed') is False for r in rows)
     assert all(r['reader']['budget']['prompt_tokens_local']+2048<=8192 for r in rows)
     assert all(r['reader']['budget']['used_passages']<=5 for r in rows)
     assert profile['resources']['samples']>0
-    protocol=json.loads((case/'protocol.json').read_text())
     review_mode=protocol['configuration']['pack'].get('review_mode','standard')
     reviews=[r['retrieval_trace'].get('evidence',{}).get('improvement_support_semantic_veto',{}) for r in rows]
     pack=protocol['configuration']['pack'];selector=pack.get('selector_mode','current')
     budgeted=[r['retrieval_trace'].get('evidence',{}).get('budgeted_selection',{}) for r in rows]
-    if protocol['stage_ablation']=='wo_pack':
+    if protocol['stage_ablation']=='wo_pack' or protocol.get('mechanism_ablation')=='wo_joint_selection':
         assert all(not d for d in budgeted), 'w/o Pack unexpectedly ran the experimental selector'
     elif selector!='current':
         assert all(d.get('enabled') and d.get('model_requests')==0 and d.get('gold_labels_used') is False
@@ -469,11 +512,14 @@ def validate(case,rows,profile):
         assert all(d.get('enabled') is False and d.get('review_mode')=='off'
                    and d.get('extra_requests')==0 and not d.get('accepted')
                    and d.get('original_parent_doc_ids')==d.get('final_doc_ids') for d in reviews)
+    from bindpack.evaluation.mechanism_audit import audit_mechanism_rows
+    mechanism_audit=audit_mechanism_rows(rows,protocol.get('mechanism_ablation','full'))
     return dict(status='passed',queries=len(rows),physical_requests=len(events),logical_calls=len(logical),
         pack_review_mode=review_mode,review_extra_requests=sum(d.get('extra_requests',0) for d in reviews),
         review_accepted_swaps=sum(bool(d.get('accepted')) for d in reviews),
         online_unknown_usage=profile['cost']['online']['attempts_with_unknown_usage'],
-        offline_unknown_usage=profile['cost']['offline_index']['attempts_with_unknown_usage'])
+        offline_unknown_usage=profile['cost']['offline_index']['attempts_with_unknown_usage'],
+        mechanism_audit=mechanism_audit)
 
 
 if __name__=='__main__':

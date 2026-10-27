@@ -16,6 +16,7 @@ import numpy as np
 from ...utils.evidence import normalized_text, branch_matches
 from .dependency_closure import _ancestors
 from .dag_package_selector import _collect_proofs, _package_sets
+from ..mechanisms import mechanisms
 
 _STOP = set("a an the and or of in on at to for from by with as is are was were be been "
             "who what which where when why how do does did have has had it its their his her "
@@ -41,12 +42,12 @@ def residual_features(question, texts):
     return facets, matrix, weights
 
 
-def closed_nodes(selected, choices, ancestors, order, visible=None):
+def closed_nodes(selected, choices, ancestors, order, visible=None, source_bound_eligibility=True):
     covered = set()
     for nid in order:
         if not ancestors[nid] <= covered:
             continue
-        if any(p['doc_id'] in selected and (visible is None or
+        if any(p['doc_id'] in selected and (not source_bound_eligibility or visible is None or
                p['evidence'] in visible.get(p['doc_id'], '')) for p in choices.get(nid, [])):
             covered.add(nid)
     return covered
@@ -55,6 +56,7 @@ def closed_nodes(selected, choices, ancestors, order, visible=None):
 class BudgetedSelector:
     def __init__(self, runtime, scorer):
         self.runtime, self.scorer, self.cfg = runtime, scorer, runtime.cfg.pack
+        self.mechanisms = mechanisms(runtime.cfg)
 
     def _visible(self, question, ordered):
         callback = getattr(self.runtime, '_joint_visible', None)
@@ -95,25 +97,34 @@ class BudgetedSelector:
                         'risk': self.cfg.selector_mode in {'risk', 'combined'},
                         'sources': self.cfg.selector_mode in {'sources', 'combined'}}
         if features.get('sources'):
+            known_nodes = {n['id'] for n in state.get('_evidence_plan',[])}
             for proof in ev.get('source_records', []):
                 d = proof.get('doc_id')
                 goal = str(proof.get('goal', ''))
-                nid = goal[4:] if goal.startswith('dag:') else None
-                if (d in candidates and nid in bindings and
-                        normalized_text(proof.get('answer', '')) == normalized_text(bindings[nid]) and
-                        branch_matches(proof.get('requirements', {}), bindings)):
+                nid = (goal[4:] if goal.startswith('dag:') else
+                       goal[5:] if goal.startswith('flat:') and not self.mechanisms.dependency_closure else None)
+                if (d in candidates and ((not self.mechanisms.source_bound_eligibility and nid in known_nodes) or
+                        (nid in bindings and normalized_text(proof.get('answer', '')) == normalized_text(bindings[nid]) and
+                         branch_matches(proof.get('requirements', {}), bindings)))):
                     candidates[d]['verified'].append(dict(proof))
         plan = state.get('_evidence_plan', [])
-        ancestors, order, error = _ancestors(plan)
-        if error or len(order) > 6:
-            ancestors, order, plan = {}, [], []
+        if self.mechanisms.dependency_closure:
+            ancestors, order, error = _ancestors(plan)
+            if error or len(order) > 6:
+                ancestors, order, plan = {}, [], []
+        else:
+            assert all(not n.get('depends_on') for n in plan), 'Dependency ablation must use independent Plan'
+            ancestors, order = {}, []
         nodes = {n['id']: n for n in plan}
         beams = state.get('_evidence_beams') or []
         winning = next((b for b in beams if b.get('bindings') == bindings), {'proofs': {}})
         diagnostic = {'rejected_proofs': []}
-        choices = _collect_proofs(nodes, bindings, winning, candidates, rank,
-                                  self.runtime._document, diagnostic, include_citations=True)
-        leaves = set(order) - {p for n in plan for p in n.get('depends_on', [])}
+        choices = (_collect_proofs(nodes, bindings, winning, candidates, rank,
+                                  self.runtime._document, diagnostic, include_citations=True,
+                                  source_bound_eligibility=self.mechanisms.source_bound_eligibility)
+                   if self.mechanisms.dependency_closure else {})
+        leaves = (set(order) - {p for n in plan for p in n.get('depends_on', [])}
+                  if self.mechanisms.dependency_closure else set())
         texts = [self.runtime._document(d) for d in domain]
         tokens = [set(normalized_text(t).split()) for t in texts]
         finite = np.nan_to_num(np.asarray(scores, float), nan=0, posinf=0, neginf=0)
@@ -142,19 +153,23 @@ class BudgetedSelector:
         # Retention protects observed literal support, including relations not
         # certified by the stricter closure grammar. It grants no closure credit.
         retention = {}
-        records = [dict(p, goal='dag:'+nid) for nid,p in winning.get('proofs',{}).items()]
+        prefix = 'dag:' if self.mechanisms.dependency_closure else 'flat:'
+        records = [dict(p, goal=prefix+nid) for nid,p in winning.get('proofs',{}).items()]
         if features.get('sources'):records += ev.get('source_records', [])
         for p in records:
-            nid = str(p.get('goal',''))[4:]
+            goal = str(p.get('goal',''))
+            nid = goal.split(':',1)[1] if ':' in goal else ''
             d, quote = p.get('doc_id'), str(p.get('evidence',''))
-            if (nid in bindings and d in local and len(quote)>=8 and quote in self.runtime._document(d)
-                    and normalized_text(p.get('answer','')) == normalized_text(bindings[nid])
-                    and normalized_text(p.get('answer','')) in normalized_text(quote)
-                    and branch_matches(p.get('requirements',{}),bindings)):
+            if (d in local and ((not self.mechanisms.source_bound_eligibility and nid in nodes) or
+                    (nid in bindings and len(quote)>=8 and quote in self.runtime._document(d)
+                     and normalized_text(p.get('answer','')) == normalized_text(bindings[nid])
+                     and normalized_text(p.get('answer','')) in normalized_text(quote)
+                     and branch_matches(p.get('requirements',{}),bindings)))):
                 retention.setdefault(nid,[]).append({'doc_id':d,'evidence':quote})
         base_visible, base_budget = self._visible(question, s0)
         supported0 = {n for n in retention if any(p['doc_id'] in s0 and
-                      p['evidence'] in base_visible.get(p['doc_id'], '') for p in retention[n])}
+                      (not self.mechanisms.source_bound_eligibility or
+                       p['evidence'] in base_visible.get(p['doc_id'], '')) for p in retention[n])}
         rho = self.cfg.joint_soft_weight if features.get('residual') else 0
         # A missing proof channel carries no information. In residual variants
         # allocate its coverage weight to the observable lexical channel rather
@@ -164,7 +179,9 @@ class BudgetedSelector:
         loss_weight = self.cfg.joint_loss_weight if features.get('risk') else 0
         def evaluate(selected, visible=None):
             indexes = [local[d] for d in selected]
-            closed = closed_nodes(selected, choices, ancestors, order, visible)
+            closed = (closed_nodes(selected, choices, ancestors, order, visible,
+                                   source_bound_eligibility=self.mechanisms.source_bound_eligibility)
+                      if self.mechanisms.dependency_closure else set())
             closure = (len(closed) / max(1, len(order)) + len(closed & leaves) / max(1, len(leaves))) / 2
             if visible is None:
                 lexical = float(np.max(soft[indexes], axis=0) @ weights / weights.sum()) if len(weights) and indexes else 0
@@ -180,14 +197,15 @@ class BudgetedSelector:
             coverage = sum(channels)/len(channels) if channels else 0
             red = sum(redundancy[a, b] for a, b in combinations(indexes, 2)) / max(1, k * (k - 1) / 2)
             lost = {n for n in supported0 if not any(p['doc_id'] in selected and
-                    (visible is None or p['evidence'] in visible.get(p['doc_id'], '')) for p in retention[n])}
+                    (not self.mechanisms.source_bound_eligibility or visible is None or
+                     p['evidence'] in visible.get(p['doc_id'], '')) for p in retention[n])}
             loss = len(lost) / max(1, len(supported0))
             value = float(rel[indexes].sum() / k + self.cfg.coverage_weight * ((1-rho)*closure + rho*coverage)
                           - self.cfg.redundancy_weight*red - loss_weight*loss)
             return value, {'closed_nodes': sorted(closed), 'predicted_closure': closure,
                            'soft_coverage': coverage, 'lexical_coverage':lexical,
                            'route_goal_coverage':route_coverage,'redundancy': red, 'lost_support': sorted(lost)}
-        packages = _package_sets(choices, ancestors, order)
+        packages = _package_sets(choices, ancestors, order) if self.mechanisms.dependency_closure else []
         packages = [p & set(domain) for p in packages if p <= set(domain) and len(p | fixed) <= k]
         packages.sort(key=lambda p: (-evaluate(fixed | p)[0], len(p), tuple(sorted(rank[d] for d in p))))
         units = [frozenset([d]) for d in domain if d not in fixed] + packages[:self.cfg.joint_package_cap]

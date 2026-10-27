@@ -4,6 +4,7 @@ from __future__ import annotations
 from .dependency_planner import DependencyPlanner
 from .dependency_executor import DependencyExecutor
 from .source_verifier import SourceVerifier
+from ..mechanisms import mechanisms
 
 
 class PlanStage:
@@ -11,9 +12,14 @@ class PlanStage:
 
     def __init__(self, runtime):
         self.runtime = runtime
-        self.planner = DependencyPlanner(runtime)
         self.verifier = SourceVerifier(runtime)
-        self.executor = DependencyExecutor(runtime, self.verifier)
+        if mechanisms(runtime.cfg).dependency_closure:
+            self.planner = DependencyPlanner(runtime)
+            self.executor = DependencyExecutor(runtime, self.verifier)
+        else:
+            from .independent import IndependentPlanner, IndependentExecutor
+            self.planner = IndependentPlanner(runtime)
+            self.executor = IndependentExecutor(runtime, self.verifier)
 
     def process_window(self, states, executor=None):
         requests = []

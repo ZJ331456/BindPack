@@ -13,6 +13,8 @@ import numpy as np
 from .utils.evidence import normalized_text, parse_object, local_rank_scores
 from .stages.plan.stage import PlanStage
 from .stages.pack.stage import PackStage
+from .stages.mechanisms import mechanisms
+from dataclasses import asdict
 
 
 class EvidencePipeline:
@@ -39,13 +41,17 @@ class EvidencePipeline:
 
 
     def _trace(self) -> dict:
-        return {"stages": {"route": self.cfg.stage_ablation != "wo_route",
+        trace = {"stages": {"route": self.cfg.stage_ablation != "wo_route",
                            "plan": self.cfg.stage_ablation != "wo_plan",
                            "pack": self.cfg.stage_ablation != "wo_pack"}, "candidate_count": 0, "search_count": 0,
                 "llm_plan_calls": 0, "llm_verification_calls": 0,
                 "semantic_failures": [], "rejected_hypotheses": [],
                 "plan": [], "bindings": {}, "branch_scores": [],
                 "routes": [], "selected_prefix": []}
+        if getattr(self.cfg,'mechanism_ablation','full') != 'full':
+            trace['mechanism_ablation'] = self.cfg.mechanism_ablation
+            trace['mechanisms'] = asdict(mechanisms(self.cfg))
+        return trace
 
 
     def _infer_object(self, messages: List[dict]) -> Tuple[Optional[dict], Optional[str]]:

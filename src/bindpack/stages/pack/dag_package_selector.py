@@ -19,6 +19,7 @@ from ..plan.answer_binder import bind_question
 from ...utils.evidence import branch_matches, normalized_text
 from .dependency_closure import _ancestors
 from .terminal_support import _literal, _relation_check, _same_subject, _subject_surface
+from copy import deepcopy
 
 
 def _topic_pronoun_safe(entity, quote, document):
@@ -109,7 +110,7 @@ def _proof_relation(node, question, proof, document, bindings):
 
 
 def _collect_proofs(nodes, bindings, winning, candidates, rank, document, diagnostic,
-                    include_citations=False):
+                    include_citations=False, source_bound_eligibility=True):
     choices = {nid: [] for nid in nodes}
     for nid, proof in winning.get("proofs", {}).items():
         if nid in choices and isinstance(proof, dict):
@@ -139,6 +140,17 @@ def _collect_proofs(nodes, bindings, winning, candidates, rank, document, diagno
             seen.add((doc_id, answer, quote))
             requirements = raw.get("requirements", {})
             source = document(doc_id) if doc_id in rank and rank[doc_id] <= 200 else ""
+            if not source_bound_eligibility:
+                if doc_id not in candidates or doc_id not in rank or rank[doc_id] > 200:
+                    diagnostic["rejected_proofs"].append({"node":nid,"doc_id":doc_id,
+                                                        "reason":"document_outside_budgeted_pool"})
+                    continue
+                item = {"doc_id":doc_id,"check":"eligibility_disabled_unverified",
+                        "confidence":confidence if math.isfinite(confidence) else 0.0,
+                        "source_verified":False}
+                if include_citations: item.update(evidence=quote,answer=answer)
+                checked.append(item)
+                continue
             if doc_id not in candidates or not source:
                 reason = "proof_outside_existing_top200_pool"
             elif nid not in bindings or not _same_entity(answer, bindings[nid], source):
@@ -260,7 +272,7 @@ def _optimize_prefix(order, original, size, fixed_count, choices, ancestors, nod
     return final
 
 
-def rerank_dag_packages(order, state, document):
+def rerank_dag_packages(order, state, document, source_bound_eligibility=True):
     """Optimize Top5 then Top10 with fixed front documents and source closures."""
     original = [int(d) for d in order]
     diagnostic = {"enabled": True, "policy": "finite_ancestor_closed_package_optimization",
@@ -290,8 +302,16 @@ def rerank_dag_packages(order, state, document):
         diagnostic["plan_error"] = "missing_exact_winning_branch"
         return original, diagnostic
     nodes = {n["id"]: n for n in plan}
-    choices = _collect_proofs(nodes, bindings, winning, state.get("evidence_candidates", {}),
-                             {d: i + 1 for i, d in enumerate(original)}, document, diagnostic)
+    candidates = state.get("evidence_candidates", {})
+    if not source_bound_eligibility:
+        candidates = deepcopy(candidates)
+        for proof in trace.get("source_records",[]):
+            d = proof.get("doc_id")
+            if d in candidates:
+                candidates[d]["verified"].append(dict(proof))
+    choices = _collect_proofs(nodes, bindings, winning, candidates,
+                             {d: i + 1 for i, d in enumerate(original)}, document, diagnostic,
+                             source_bound_eligibility=source_bound_eligibility)
     diagnostic["eligible_proofs"] = choices
     packages = _package_sets(choices, ancestors, node_order)
     diagnostic["eligible_package_count"] = len(packages)
@@ -322,12 +342,14 @@ def rerank_dag_packages(order, state, document):
 class DAGPackageSelector:
     """Promote supported ancestor-closed packages after coverage selection."""
 
-    def __init__(self, document):
+    def __init__(self, document, source_bound_eligibility=True):
         self.document = document
+        self.source_bound_eligibility = source_bound_eligibility
 
     def select(self, result, state):
         original_ids, original_scores, original_trace = result
-        final, diagnostic = rerank_dag_packages(original_ids, state, self.document)
+        final, diagnostic = rerank_dag_packages(original_ids, state, self.document,
+                                               source_bound_eligibility=self.source_bound_eligibility)
         trace = dict(original_trace, improvement_dag_package=diagnostic)
         if np.array_equal(np.asarray(final), original_ids):
             return original_ids, original_scores, trace

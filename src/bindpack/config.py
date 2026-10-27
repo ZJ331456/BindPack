@@ -22,6 +22,10 @@ class BindPackConfig(RuntimeConfig):
         super().__post_init__()
         if self.stage_ablation not in {"full", "wo_route", "wo_plan", "wo_pack"}:
             raise ValueError("stage_ablation must be full, wo_route, wo_plan or wo_pack")
+        if self.mechanism_ablation!='full' and self.stage_ablation!='full':
+            raise ValueError('Run stage and mechanism ablations separately')
+        if self.mechanism_ablation!='full' and self.pack.review_mode!='off':
+            raise ValueError('Mechanism experiments require support_semantic_veto off')
         for name, schema in (("candidates", CandidateConfig), ("route", RouteConfig),
                              ("plan", PlanConfig), ("pack", PackConfig)):
             if not isinstance(getattr(self, name), schema):

@@ -13,6 +13,7 @@ _RUNTIME_DEFAULTS = json.loads(Path(__file__).with_name("defaults.json").read_te
 
 @dataclass
 class RuntimeConfig:
+    mechanism_ablation: str = _RUNTIME_DEFAULTS["mechanism_ablation"]
     llm_name: str = _RUNTIME_DEFAULTS["llm_name"]
     llm_base_url: Optional[str] = _RUNTIME_DEFAULTS["llm_base_url"]
     embedding_base_url: Optional[str] = _RUNTIME_DEFAULTS["embedding_base_url"]
@@ -57,6 +58,10 @@ class RuntimeConfig:
     def __post_init__(self):
         from .validation import validate_runtime
         validate_runtime(self)
+        if self.mechanism_ablation not in {
+            "full", "wo_source_bound_eligibility", "wo_dependency_closure", "wo_joint_selection"
+        }:
+            raise ValueError("Unknown mechanism_ablation")
         if not isinstance(self.openie_strict, bool):
             raise ValueError('openie_strict must be a bool')
         if self.openie_prompt_version not in ('origin', 'optimized'):
