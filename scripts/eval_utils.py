@@ -1,6 +1,9 @@
-"""Evaluation helpers for PropRAG dataset scripts."""
+"""Evaluation helpers with shared annotation-aware benchmark adapters."""
 
+import importlib.util
 import json
+from pathlib import Path
+import sys
 import random
 from typing import Any, Dict, List, Optional
 
@@ -17,36 +20,24 @@ def sample_indices(total: int, sample_size: int, seed: int) -> Optional[List[int
     return sorted(rng.sample(range(total), sample_size))
 
 
-def get_benchmark_hops(samples: List[Dict[str, Any]], dataset_name: str) -> List[int]:
-    """Return benchmark hop labels in sample order, never using answer content.
-
-    MuSiQue supplies an oracle decomposition for every question. The other
-    datasets only support a dataset-level prior, not a per-question hop count.
-    """
-    if dataset_name == "musique":
-        hops = []
-        for idx, sample in enumerate(samples):
-            decomposition = sample.get("question_decomposition")
-            if (
-                not isinstance(decomposition, list)
-                or len(decomposition) not in (2, 3, 4)
-                or any(
-                    not isinstance(step, dict)
-                    or not isinstance(step.get("question"), str)
-                    or not step["question"].strip()
-                    for step in decomposition
-                )
-            ):
-                raise ValueError(
-                    f"MuSiQue sample index {idx} lacks a valid 2/3/4-step question_decomposition"
-                )
-            hops.append(len(decomposition))
-        return hops
-    if dataset_name in ("hotpotqa", "2wikimultihopqa"):
-        return [2] * len(samples)
-    if dataset_name in ("nq", "popqa"):
-        return [1] * len(samples)
-    raise ValueError(f"No benchmark hop policy for dataset={dataset_name!r}")
+# Import the pure-stdlib adapter directly: importing bindpack.__init__ would
+# initialize the model stack during launcher preflight and offline tests.
+_ADAPTER_NAME = "_bindpack_benchmark_adapter"
+if _ADAPTER_NAME not in sys.modules:
+    _spec = importlib.util.spec_from_file_location(
+        _ADAPTER_NAME, Path(__file__).resolve().parents[1] / "src/bindpack/evaluation/dataset_adapter.py")
+    _adapter = importlib.util.module_from_spec(_spec)
+    sys.modules[_ADAPTER_NAME] = _adapter
+    _spec.loader.exec_module(_adapter)
+_adapter = sys.modules[_ADAPTER_NAME]
+get_benchmark_hops = _adapter.get_benchmark_hops
+describe_benchmark_hops = _adapter.describe_benchmark_hops
+get_query_text = _adapter.get_query_text
+get_sample_id = _adapter.get_sample_id
+get_classification_label = _adapter.get_classification_label
+get_dataset_task = _adapter.get_dataset_task
+render_context_document = _adapter.render_context_document
+DEFAULT_DATA_DIR = _adapter.DEFAULT_DATA_DIR
 
 
 def _answer_alias_list(value: Any) -> List[str]:
@@ -74,14 +65,8 @@ def get_gold_docs(samples: List[Dict[str, Any]], dataset_name: str) -> List[List
             gold_title_and_content_list = [
                 item for item in sample["context"] if item[0] in gold_title
             ]
-            if dataset_name.startswith("hotpotqa"):
-                gold_doc = [
-                    item[0] + "\n" + "".join(item[1]) for item in gold_title_and_content_list
-                ]
-            else:
-                gold_doc = [
-                    item[0] + "\n" + " ".join(item[1]) for item in gold_title_and_content_list
-                ]
+            gold_doc = [render_context_document(item[0], item[1], dataset_name)
+                        for item in gold_title_and_content_list]
         elif "contexts" in sample:  # nq-like
             contexts = sample["contexts"]
             supporting_contexts = [
@@ -111,10 +96,12 @@ def get_gold_docs(samples: List[Dict[str, Any]], dataset_name: str) -> List[List
     return gold_docs
 
 
-def get_gold_answers(samples: List[Dict[str, Any]]) -> List[List[str]]:
+def get_gold_answers(samples: List[Dict[str, Any]], dataset_name: str = "") -> List[List[str]]:
     """
     Same extraction policy as hipporag/eval/ori_eval_utils.py.
     """
+    if dataset_name == "hover":
+        return [[get_classification_label(sample)] for sample in samples]
     gold_answers: List[List[str]] = []
     for sample in samples:
         if "answer" in sample or "gold_ans" in sample:
@@ -166,11 +153,7 @@ def build_docs_from_samples(samples: List[Dict[str, Any]], dataset_name: str) ->
     for sample in samples:
         if "supporting_facts" in sample and "context" in sample:
             for title, sentences in sample["context"]:
-                if dataset_name.startswith("hotpotqa"):
-                    text = "".join(sentences)
-                else:
-                    text = " ".join(sentences)
-                docs_map[f"{title}\n{text}"] = None
+                docs_map[render_context_document(title, sentences, dataset_name)] = None
         elif "paragraphs" in sample:
             for para in sample["paragraphs"]:
                 title = para.get("title", "")

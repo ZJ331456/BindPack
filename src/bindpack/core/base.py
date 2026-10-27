@@ -18,6 +18,7 @@ from ..index.openie.source_verified_openie import SourceVerifiedOpenIE as OpenIE
 from ..index.openie.structural_openie import StructuralOpenIE
 from ..evaluation.retrieval_eval import RetrievalRecall
 from ..evaluation.qa_eval import QAExactMatch, QAF1Score
+from ..evaluation.metric_report import parse_hover_reader_response, score_hover_classification
 from ..prompts.linking import get_query_instruction
 from ..prompts.prompt_template_manager import PromptTemplateManager
 from ..retrieval.rerank import DSPyFilter
@@ -280,7 +281,8 @@ class BaseRAG(GraphIndexMixin):
                 - A dictionary with overall QA evaluation metrics (exact match and F1 scores).
 
         """
-        if gold_answers is not None:
+        hover_task = self.global_config.dataset == "hover"
+        if gold_answers is not None and not hover_task:
             qa_em_evaluator = QAExactMatch(global_config=self.global_config)
             qa_f1_evaluator = QAF1Score(global_config=self.global_config)
 
@@ -298,12 +300,20 @@ class BaseRAG(GraphIndexMixin):
 
         # Evaluating QA
         if gold_answers is not None:
-            overall_qa_em_result, example_qa_em_results = qa_em_evaluator.calculate_metric_scores(
-                gold_answers=gold_answers, predicted_answers=[qa_result.answer for qa_result in queries_solutions],
-                aggregation_fn=np.max)
-            overall_qa_f1_result, example_qa_f1_results = qa_f1_evaluator.calculate_metric_scores(
-                gold_answers=gold_answers, predicted_answers=[qa_result.answer for qa_result in queries_solutions],
-                aggregation_fn=np.max)
+            if hover_task:
+                if any(not isinstance(aliases, list) or len(aliases) != 1 for aliases in gold_answers):
+                    raise ValueError("HoVer requires one native classification label per claim")
+                overall_qa_em_result, _, _ = score_hover_classification(
+                    [qa_result.answer for qa_result in queries_solutions],
+                    [aliases[0] for aliases in gold_answers])
+                overall_qa_f1_result = {}
+            else:
+                overall_qa_em_result, example_qa_em_results = qa_em_evaluator.calculate_metric_scores(
+                    gold_answers=gold_answers, predicted_answers=[qa_result.answer for qa_result in queries_solutions],
+                    aggregation_fn=np.max)
+                overall_qa_f1_result, example_qa_f1_results = qa_f1_evaluator.calculate_metric_scores(
+                    gold_answers=gold_answers, predicted_answers=[qa_result.answer for qa_result in queries_solutions],
+                    aggregation_fn=np.max)
 
             # round off to 4 decimal places for QA results
             overall_qa_em_result.update(overall_qa_f1_result)
@@ -349,7 +359,12 @@ class BaseRAG(GraphIndexMixin):
             prompt_user = ''
             for passage in retrieved_passages:
                 prompt_user += f'Wikipedia Title: {passage}\n\n'
-            prompt_user += 'Question: ' + query_solution.question + '\nThought: '
+            if self.global_config.dataset == "hover":
+                prompt_user += 'Claim: ' + query_solution.question + '\n'
+                if not self.prompt_template_manager.is_template_name_valid(name='rag_qa_hover'):
+                    raise ValueError("HoVer claim verification requires the rag_qa_hover template")
+            else:
+                prompt_user += 'Question: ' + query_solution.question + '\nThought: '
 
             if self.prompt_template_manager.is_template_name_valid(name=f'rag_qa_{self.global_config.dataset}'):
                 # find the corresponding prompt for this dataset
@@ -371,6 +386,10 @@ class BaseRAG(GraphIndexMixin):
         queries_solutions = []
         for query_solution_idx, query_solution in tqdm(enumerate(queries), desc="Extraction Answers from LLM Response"):
             response_content = all_response_message[query_solution_idx]
+            if self.global_config.dataset == "hover":
+                query_solution.answer = parse_hover_reader_response(response_content)
+                queries_solutions.append(query_solution)
+                continue
             try:
                 text = response_content if isinstance(response_content, str) else str(response_content)
                 text = text.strip()

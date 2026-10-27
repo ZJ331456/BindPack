@@ -15,7 +15,8 @@ from .review_prompt import (
 )
 
 
-def validate_verification(query, order, state, document, proposal_diag, response, finish_reason='stop'):
+def validate_verification(query, order, state, document, proposal_diag, response, finish_reason='stop',
+                          require_explanations=True):
     diag = {'enabled': True, 'policy': 'decision_only_semantic_veto_on_source_validated_proposal',
         'gold_labels_used': False, 'generator_rationale_visible': False, 'approved': False,
         'entailment_guaranteed': False, 'reviewer_quotes_used_as_evidence': False,
@@ -48,10 +49,14 @@ def validate_verification(query, order, state, document, proposal_diag, response
     failed = [key for key in _CHECKS if not payload[key]]
     if failed:
         return reject('review_conditions_not_met:' + ','.join(failed))
-    for key in ('old_missing_fact', 'candidate_supplied_fact', 'victim_reason', 'reason'):
+    explanation_keys = (('old_missing_fact', 'candidate_supplied_fact', 'victim_reason', 'reason')
+                        if require_explanations else ('old_missing_fact', 'candidate_supplied_fact'))
+    for key in explanation_keys:
         value = payload.get(key)
         if not isinstance(value, str) or len(value.strip()) < 8:
             return reject('missing_semantic_review_explanation:' + key)
         diag[key] = value
+    if not require_explanations:
+        diag['explanation_suffix_required'] = False
     diag['approved'] = True
     return True, diag

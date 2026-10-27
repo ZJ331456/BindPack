@@ -108,7 +108,8 @@ def _proof_relation(node, question, proof, document, bindings):
     return None, reason or local_reason or "unknown_relation_not_promoted"
 
 
-def _collect_proofs(nodes, bindings, winning, candidates, rank, document, diagnostic):
+def _collect_proofs(nodes, bindings, winning, candidates, rank, document, diagnostic,
+                    include_citations=False):
     choices = {nid: [] for nid in nodes}
     for nid, proof in winning.get("proofs", {}).items():
         if nid in choices and isinstance(proof, dict):
@@ -170,7 +171,10 @@ def _collect_proofs(nodes, bindings, winning, candidates, rank, document, diagno
             if reason:
                 diagnostic["rejected_proofs"].append({"node": nid, "doc_id": doc_id, "reason": reason})
             elif check:
-                checked.append({"doc_id": doc_id, "check": check, "confidence": confidence})
+                item = {"doc_id": doc_id, "check": check, "confidence": confidence}
+                if include_citations:
+                    item.update(evidence=quote, answer=answer)
+                checked.append(item)
         # Fixed bounded branching: three source alternatives per node, at most
         # 3**6 assignments for any of the 64 closed node subsets.
         by_doc = {p["doc_id"]: p for p in checked}

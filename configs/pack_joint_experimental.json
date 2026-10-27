@@ -1,0 +1,10 @@
+{
+  "pack": {
+    "relation_weight": 0.6,
+    "review_mode": "off",
+    "selector_mode": "combined",
+    "joint_fixed_prefix": 2,
+    "joint_search_seconds": 5.0,
+    "joint_state_cap": 2048
+  }
+}

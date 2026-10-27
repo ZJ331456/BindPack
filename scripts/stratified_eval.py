@@ -7,6 +7,7 @@ import numpy as np
 
 from bindpack.evaluation.retrieval_eval import RetrievalRecall
 from bindpack.evaluation.qa_eval import QAExactMatch, QAF1Score
+from bindpack.evaluation.metric_report import score_hover_classification
 from bindpack.utils.misc_utils import QuerySolution
 
 
@@ -41,6 +42,13 @@ def estimate_query_hops_simple(query: str) -> int:
         return 2
     else:
         return 3
+
+
+def _hover_metrics(gold_answers, predicted_answers):
+    if any(not isinstance(aliases, list) or len(aliases) != 1 for aliases in gold_answers):
+        raise ValueError("HoVer requires one native classification label per claim")
+    metrics, _, _ = score_hover_classification(predicted_answers, [aliases[0] for aliases in gold_answers])
+    return metrics
 
 
 def stratify_by_hops(
@@ -119,7 +127,9 @@ def evaluate_stratified(
         and len(predicted_answers) == len(queries)
         and any(len(x) > 0 for x in gold_answers)
     )
-    if can_eval_qa:
+    if can_eval_qa and getattr(global_config, "dataset", None) == "hover":
+        overall_qa = _hover_metrics(gold_answers, predicted_answers)
+    elif can_eval_qa:
         qa_em_eval = QAExactMatch(global_config=global_config)
         qa_f1_eval = QAF1Score(global_config=global_config)
         overall_em, _ = qa_em_eval.calculate_metric_scores(
@@ -171,7 +181,10 @@ def evaluate_stratified(
         )
         
         # QA metrics (optional)
-        if can_eval_qa:
+        if can_eval_qa and getattr(global_config, "dataset", None) == "hover":
+            hop_pred_answers = [predicted_answers[i] for i in data["indices"]]
+            strat_qa = _hover_metrics(data["gold_answers"], hop_pred_answers)
+        elif can_eval_qa:
             hop_indices = data["indices"]
             hop_pred_answers = [predicted_answers[i] for i in hop_indices]
             qa_em_eval = QAExactMatch(global_config=global_config)
@@ -240,6 +253,9 @@ def print_stratified_results(results: Dict[str, Any]):
                 print(f"    EM: {qa['EM']:.4f}")
             if "F1" in qa:
                 print(f"    F1: {qa['F1']:.4f}")
+            for metric in ("ClassificationAccuracy", "ClassificationMacroF1"):
+                if metric in qa:
+                    print(f"    {metric}: {qa[metric]:.4f}")
     
     print("\n" + "=" * 80)
 

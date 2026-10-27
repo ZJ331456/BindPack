@@ -53,10 +53,19 @@
     "budget": 5,
     "base_weight": 0.4,
     "coverage_weight": 0.45,
-    "relation_weight": 0.25,
+    "relation_weight": 0.6,
     "redundancy_weight": 0.15,
     "review_tokenizer": "/root/models/Qwen3-8B",
-    "review_context_length": 8192
+    "review_context_length": 8192,
+    "review_mode": "off",
+    "selector_mode": "combined",
+    "joint_beam_width": 12,
+    "joint_package_cap": 64,
+    "joint_search_seconds": 5.0,
+    "joint_soft_weight": 0.5,
+    "joint_loss_weight": 0.1,
+    "joint_state_cap": 4096,
+    "joint_fixed_prefix": 0
   },
   "plan": {
     "node_budget": 6,

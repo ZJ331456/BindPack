@@ -80,7 +80,7 @@ def construct_config(cls, path=None, **overrides):
 
 
 def validate_groups(config):
-    """Reject invalid budgets while preserving all evaluated default values."""
+    """Reject invalid budgets and incompatible selector/review combinations."""
     if not 1 <= config.plan.node_budget <= 8 or not 1 <= config.plan.depth_budget <= 4:
         raise ValueError("Plan node/depth budgets must be within 1..8 and 1..4")
     if config.plan.beam_width != 1:
@@ -93,6 +93,18 @@ def validate_groups(config):
         raise ValueError("Candidate search budgets must be positive and the pool at least five")
     positive(config.candidates.rank_constant, "candidates.rank_constant")
     positive(config.pack.review_context_length, "pack.review_context_length")
+    if config.pack.review_mode not in {"off", "standard", "suffix_stop"}:
+        raise ValueError("pack.review_mode must be off, standard or suffix_stop")
+    if config.pack.selector_mode not in {"current", "closed", "residual", "risk", "sources", "combined"}:
+        raise ValueError("Unknown pack.selector_mode")
+    if config.pack.selector_mode != "current" and config.pack.review_mode != "off":
+        raise ValueError("Joint packing requires review_mode=off")
+    for name in ("joint_beam_width", "joint_package_cap", "joint_search_seconds", "joint_state_cap"):
+        positive(getattr(config.pack, name), "pack." + name)
+    unit(config.pack.joint_soft_weight, "pack.joint_soft_weight")
+    nonnegative(config.pack.joint_loss_weight, "pack.joint_loss_weight")
+    if config.pack.joint_fixed_prefix not in {0, 2}:
+        raise ValueError("pack.joint_fixed_prefix must be 0 or 2")
     unit(config.pack.base_weight, "pack.base_weight")
     for name in ("coverage_weight", "relation_weight", "redundancy_weight"):
         nonnegative(getattr(config.pack, name), "pack." + name)

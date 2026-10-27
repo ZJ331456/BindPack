@@ -14,7 +14,12 @@ from typing import Any, Dict, List
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BindPack_ROOT = os.path.dirname(SCRIPT_DIR)
-PROJECT_ROOT = os.path.dirname(BindPack_ROOT)
+
+# An existing launcher may start its next child after a source update. Keep
+# those exact registered invocations on the source/input snapshot they began.
+if __name__ == "__main__":
+    from utils.frozen_runtime import maybe_exec_frozen_evaluation
+    maybe_exec_frozen_evaluation(sys.argv[1:], BindPack_ROOT)
 
 # bindpack package
 sys.path.insert(0, os.path.join(BindPack_ROOT, "src"))
@@ -29,6 +34,11 @@ from eval_utils import (
     get_gold_answers,
     get_gold_docs,
     get_benchmark_hops,
+    describe_benchmark_hops,
+    get_query_text,
+    get_sample_id,
+    get_dataset_task,
+    DEFAULT_DATA_DIR,
     load_json,
     sample_indices,
 )
@@ -67,8 +77,8 @@ def _select_samples(samples: List[Dict[str, Any]], sample_size: int, sample_seed
 
 def run_eval(dataset: str, args: argparse.Namespace) -> str:
     dataset_file_stem = "nq_rear" if dataset == "nq" else dataset
-    data_path = args.data_path or os.path.join(PROJECT_ROOT, "datasets", f"{dataset_file_stem}.json")
-    corpus_path = args.corpus_path or os.path.join(PROJECT_ROOT, "datasets", f"{dataset_file_stem}_corpus.json")
+    data_path = args.data_path or str(DEFAULT_DATA_DIR / f"{dataset_file_stem}.json")
+    corpus_path = args.corpus_path or str(DEFAULT_DATA_DIR / f"{dataset_file_stem}_corpus.json")
     hop_source = getattr(args, "hop_source", "benchmark")
     if hop_source != "benchmark":
         raise ValueError(f"Unknown hop_source={hop_source!r}")
@@ -85,13 +95,20 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
     logger.info("[1/4] Loading dataset: %s", dataset)
     samples_all = load_json(data_path)
     corpus = load_json(corpus_path)
+    if not isinstance(samples_all, list) or not samples_all:
+        raise ValueError(f"Empty/invalid benchmark: {data_path}")
+    for sample in samples_all:
+        get_query_text(sample, dataset)
+        if dataset == "hover":
+            get_sample_id(sample, dataset)
+    if dataset == "hover":
+        get_gold_answers(samples_all, dataset)
 
-    # Validate the entire benchmark split before sampling. A subset must not
-    # conceal missing MuSiQue decomposition labels elsewhere in the file.
+    # Validate the entire split before sampling, including native hop labels.
     benchmark_hops_all = get_benchmark_hops(samples_all, dataset)
     if (not isinstance(benchmark_hops_all, list) or len(benchmark_hops_all) != len(samples_all)
             or any(type(hop) is not int or not 1 <= hop <= 4 for hop in benchmark_hops_all)):
-        raise ValueError(f"{dataset}: benchmark hop labels/priors are missing or invalid")
+        raise ValueError(f"{dataset}: benchmark hop annotations/prior are missing or invalid")
 
     samples, selected_indices = _select_samples(
         samples=samples_all,
@@ -101,35 +118,15 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
         sample_indices_file=getattr(args, "sample_indices_file", ""),
     )
 
-    queries = [s["question"] for s in samples]
+    queries = [get_query_text(sample, dataset) for sample in samples]
     benchmark_hops = [benchmark_hops_all[i] for i in selected_indices]
-    if dataset == "musique":
-        hop_provenance = {
-            "kind": "per_question_oracle",
-            "field": "question_decomposition length",
-            "oracle": True,
-            "validated_samples": len(samples_all),
-        }
-    elif dataset in ("hotpotqa", "2wikimultihopqa"):
-        hop_provenance = {
-            "kind": "dataset_level_prior",
-            "value": 2,
-            "oracle": False,
-            "note": "Question type and support count are not serial hop labels.",
-        }
-    else:
-        hop_provenance = {
-            "kind": "dataset_level_prior",
-            "value": 1,
-            "oracle": False,
-            "note": "Single-hop benchmark prior; support count is not a hop label.",
-        }
+    hop_provenance = describe_benchmark_hops(samples_all, dataset)
     hop_type_distribution = (
         dict(Counter(str(s["type"]) for s in samples))
         if dataset in ("hotpotqa", "2wikimultihopqa")
         else {}
     )
-    gold_answers = get_gold_answers(samples)
+    gold_answers = get_gold_answers(samples, dataset)
     gold_docs = get_gold_docs(samples, dataset)
 
     if args.corpus_mode == "sample_only":
@@ -139,8 +136,12 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
         if args.max_corpus_docs > 0:
             docs = docs[: args.max_corpus_docs]
 
+    corpus_size_before_completion = len(set(docs))
     if args.ensure_gold_in_corpus:
         docs = ensure_gold_docs_in_corpus(docs=docs, gold_docs=gold_docs)
+    gold_completion_added = len(set(docs)) - corpus_size_before_completion
+    if gold_completion_added:
+        logger.info("Added %d exact gold passages missing from source corpus", gold_completion_added)
 
     logger.info(
         "Samples=%d (selected=%s), Corpus docs for indexing=%d (mode=%s)",
@@ -273,6 +274,7 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
         json.dump(
             {
                 "dataset": dataset,
+                "task": get_dataset_task(dataset),
                 "stage_ablation": config.stage_ablation,
                 "hop_source": hop_source,
                 "hop_provenance": hop_provenance,
@@ -293,6 +295,7 @@ def run_eval(dataset: str, args: argparse.Namespace) -> str:
                 "candidate_output_top_k": getattr(args, "candidate_output_top_k", 200),
                 "corpus_mode": args.corpus_mode,
                 "indexed_docs": len(docs),
+                "gold_completion_added": gold_completion_added,
                 "eval_mode": args.eval_mode,
                 "retrieval_metrics": retrieval_metrics,
                 "qa_metrics": qa_metrics,
@@ -343,11 +346,11 @@ def _openie_worker_count(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate BindPack on supported datasets")
-    parser.add_argument("--dataset", required=True, choices=["musique", "hotpotqa", "2wikimultihopqa", "nq", "popqa"])
+    parser.add_argument("--dataset", required=True, choices=["musique", "hotpotqa", "2wikimultihopqa", "hover", "nq", "popqa"])
     parser.add_argument("--data_path", default="")
     parser.add_argument("--corpus_path", default="")
     parser.add_argument("--hop_source", choices=["benchmark"], default="benchmark",
-                        help="Use documented dataset labels/priors; MuSiQue per-question hops are oracle labels.")
+                        help="Read documented per-question reference annotations; single-hop datasets use a prior.")
 
     parser.add_argument("--sample_size", type=int, default=0, help="0 means all")
     parser.add_argument("--sample_seed", type=int, default=42)

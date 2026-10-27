@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from .semantic_swap_gate import build_verifier_prompt, validate_verification
 from .support_guard import support_guard
+from .response_prefix import STOP_SEQUENCES, normalize_prefix
 from ..typed_joint_selector import apply_joint_selection, build_joint_prompt
 
 
@@ -29,13 +30,23 @@ def _state(trace):
             "_evidence_beams": trace.get("branch_scores", [])}
 
 
-def _request(runtime, messages):
-    result = runtime.rag.llm_model.infer(messages, response_format={"type": "json_object"})
+def _request(runtime, messages, stage=None):
+    suffix_stop = runtime.cfg.pack.review_mode == "suffix_stop"
+    kwargs = {"response_format": {"type": "json_object"}}
+    if suffix_stop:
+        kwargs["stop"] = STOP_SEQUENCES[stage]
+    result = runtime.rag.llm_model.infer(messages, **kwargs)
     response = result[0] if isinstance(result, tuple) else result
     metadata = result[1] if isinstance(result, tuple) and len(result) > 1 else {}
-    return {"response": runtime.rag._extract_llm_text(response),
+    raw = runtime.rag._extract_llm_text(response)
+    value, repaired = normalize_prefix(raw, stage) if suffix_stop else (raw, False)
+    output = {"response": value,
             "metadata": metadata if isinstance(metadata, dict) else {},
             "cache_hit": bool(result[2]) if isinstance(result, tuple) and len(result) > 2 else None}
+    if suffix_stop:
+        output.update(raw_response=raw, stop_sequences=STOP_SEQUENCES[stage],
+                      json_closure_reconstructed=repaired)
+    return output
 
 
 def _preflight(runtime, messages):
@@ -63,7 +74,7 @@ def _fetch(runtime, executor, contexts, stage):
         ctx[stage + "_preflight"] = check
         if check["allowed"]:
             # At most one stage's window is outstanding, bounded by workers.
-            futures.append((ctx, executor.submit(_request, runtime, messages)))
+            futures.append((ctx, executor.submit(_request, runtime, messages, stage)))
     for ctx, future in futures:
         # Terminal HTTP/cache exceptions propagate; they are never reported as
         # a successful semantic abstention.
@@ -72,7 +83,22 @@ def _fetch(runtime, executor, contexts, stage):
 
 def postprocess_support_semantic_veto(runtime, inputs):
     """Update QuerySolutions from real parent IDs before retrieval evaluation."""
+    if runtime.cfg.pack.review_mode == "off":
+        for solution, ids in inputs:
+            original = [int(value) for value in ids]
+            evidence = dict(solution.retrieval_trace.get("evidence", {}))
+            evidence["improvement_support_semantic_veto"] = {
+                "enabled": False, "review_mode": "off", "policy": "disabled_by_configuration",
+                "gold_labels_used": False, "accepted": False, "extra_requests": 0,
+                "original_parent_doc_ids": original, "final_doc_ids": list(original),
+                "promotions": [], "top2_preserved": True, "top10_set_preserved": True,
+                "top200_set_preserved": True, "suffix_preserved": True,
+            }
+            solution.retrieval_trace = dict(solution.retrieval_trace, evidence=evidence)
+        return {"enabled": False, "review_mode": "off", "questions": len(inputs),
+                "logical_extra_requests": 0, "applied": 0}
     workers = max(1, int(runtime.cfg.llm_prefetch_workers))
+    suffix_stop = runtime.cfg.pack.review_mode == "suffix_stop"
     counts = Counter()
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bindpack-support-review") as executor:
         with tqdm(total=len(inputs), desc="Evidence support/semantic veto") as progress:
@@ -88,23 +114,27 @@ def postprocess_support_semantic_veto(runtime, inputs):
                         raise ValueError("Parent document text does not match its physical ID")
                     trace = deepcopy(solution.retrieval_trace["evidence"])
                     state = _state(trace)
-                    messages = build_joint_prompt(solution.question, old, state, runtime._document)
+                    _, early_guard = support_guard(solution.question, old, state, runtime._document, None)
+                    no_victim = bool(old[2:5]) and set(old[2:5]) <= set(early_guard["protected_doc_ids"])
+                    messages = None if no_victim else build_joint_prompt(solution.question, old, state, runtime._document)
                     contexts.append({"solution": solution, "old": old, "trace": trace, "state": state,
-                                     "proposer_messages": messages})
+                                     "proposer_messages": messages, "no_legal_victim": no_victim})
                 _fetch(runtime, executor, contexts, "proposer")
                 for ctx in contexts:
                     query, old, state = ctx["solution"].question, ctx["old"], ctx["state"]
                     response = ctx.get("proposer_response")
                     proposed, proposal = apply_joint_selection(query, old, state, runtime._document,
                         response["response"] if response else '{"swap":null}',
-                        response["metadata"].get("finish_reason", "unknown") if response else "stop")
+                        response["metadata"].get("finish_reason", "unknown") if response else "stop",
+                        require_explanations=not suffix_stop)
                     if ctx.get("proposer_preflight", {}).get("allowed") is False:
                         proposal = dict(proposal, abstain_reason="proposer_prompt_exceeds_context_limit")
+                    if ctx.get("no_legal_victim"):
+                        proposal = dict(proposal, abstain_reason="all_replacement_positions_protected")
                     allowed, guard = support_guard(query, old, state, runtime._document, proposal)
                     ctx.update(proposed=proposed, proposal=proposal, guard=guard, guard_allowed=allowed)
-                    # Review every accepted base proposal, including locally
-                    # vetoed ones, to match the evaluated two-control protocol.
-                    if proposed != old:
+                    # A local veto cannot be overturned by independent review.
+                    if proposed != old and allowed:
                         messages = build_verifier_prompt(query, old, state, runtime._document, proposal)
                         if messages is None:
                             raise ValueError("Source-validated proposal has no independent review prompt")
@@ -115,9 +145,13 @@ def postprocess_support_semantic_veto(runtime, inputs):
                     review = ctx.get("reviewer_response")
                     approved, semantic = validate_verification(solution.question, old, state,
                         runtime._document, ctx["proposal"], review["response"] if review else '{}',
-                        review["metadata"].get("finish_reason", "unknown") if review else "stop")
+                        review["metadata"].get("finish_reason", "unknown") if review else "stop",
+                        require_explanations=not suffix_stop)
                     if ctx.get("reviewer_preflight", {}).get("allowed") is False:
                         semantic = dict(semantic, rejection_reason="reviewer_prompt_exceeds_context_limit")
+                    if ctx["proposed"] != old and not ctx["guard_allowed"]:
+                        semantic = dict(semantic, review_requested=False,
+                                        rejection_reason="not_reviewed_local_support_veto")
                     accepted = ctx["proposed"] != old and ctx["guard_allowed"] and approved
                     new = ctx["proposed"] if accepted else old
                     invariants = {"top2_preserved": new[:2] == old[:2],
@@ -133,7 +167,8 @@ def postprocess_support_semantic_veto(runtime, inputs):
                               for stage in ("proposer", "reviewer")}
                     calls = sum(ctx.get(stage + "_response") is not None for stage in stages)
                     diagnostic = {"enabled": True, "gold_labels_used": False,
-                        "policy": "existing_support_guard_and_independent_semantic_veto",
+                        "policy": ("existing_support_guard_and_independent_semantic_veto_suffix_stop"
+                                   if suffix_stop else "existing_support_guard_and_independent_semantic_veto"),
                         "entailment_guaranteed": False, "accepted": bool(accepted),
                         "original_parent_doc_ids": old, "final_doc_ids": new, "extra_requests": calls,
                         "base_proposal": ctx["proposal"], "support_guard": ctx["guard"],
@@ -154,7 +189,7 @@ def postprocess_support_semantic_veto(runtime, inputs):
                     counts["base_proposals"] += ctx["proposed"] != old
                     counts["applied"] += accepted
                     counts["support_vetoes"] += ctx["proposed"] != old and not ctx["guard_allowed"]
-                    counts["semantic_vetoes"] += ctx["proposed"] != old and not approved
+                    counts["semantic_vetoes"] += ctx["proposed"] != old and ctx["guard_allowed"] and not approved
                     counts["context_abstentions"] += any(
                         stage["preflight"] and not stage["preflight"]["allowed"] for stage in stages.values())
                     progress.update(1)

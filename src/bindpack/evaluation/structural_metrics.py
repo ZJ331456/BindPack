@@ -195,7 +195,8 @@ def evaluate_query_metrics(row: Mapping[str, Any], sample: Mapping[str, Any], da
         raise AssertionError("fixed-ranking coverage must not decrease with K")
     ranking_metadata = {key: value for key, value in ranking.items() if key not in {"prefix", "ranks", "first_ranks"}}
     return {
-        "sample_id": row.get("sample_id", sample.get("id", sample.get("_id"))),
+        "sample_id": row.get("sample_id", sample.get("hover_id") if dataset_name == "hover"
+                             else sample.get("id", sample.get("_id"))),
         "query_index": row.get("query_index"), "gold_documents": labels,
         "gold_graph": graph, "ranking": ranking_metadata, "at_k": at_k,
     }
@@ -215,10 +216,12 @@ def evaluate_structural_metrics(rows: Sequence[Mapping[str, Any]], samples: Sequ
     corpus = None if corpus_docs is None else set(corpus_docs)
     per_query = []
     for index, (row, sample) in enumerate(zip(rows, samples)):
-        sample_id = sample.get("id", sample.get("_id"))
+        sample_id = (sample.get("hover_id") if dataset_name == "hover"
+                     else sample.get("id", sample.get("_id")))
         if sample_id is not None and row.get("sample_id") is not None and str(sample_id) != str(row["sample_id"]):
             raise ValueError(f"Sample ID mismatch at row {index}")
-        if row.get("question") is not None and sample.get("question") is not None and row["question"] != sample["question"]:
+        question = sample.get("claim") if dataset_name == "hover" else sample.get("question")
+        if row.get("question") is not None and question is not None and row["question"] != question:
             raise ValueError(f"Question mismatch at row {index}")
         per_query.append(evaluate_query_metrics(row, sample, dataset_name, ks, corpus_docs=corpus))
     metrics, per_k, dag_subset = {}, {}, {}

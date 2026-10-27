@@ -50,7 +50,7 @@ class RuntimeConfig:
     max_qa_steps: int = _RUNTIME_DEFAULTS["max_qa_steps"]
     qa_top_k: int = _RUNTIME_DEFAULTS["qa_top_k"]
     save_dir: Optional[str] = _RUNTIME_DEFAULTS["save_dir"]
-    dataset: Optional[Literal['hotpotqa', 'hotpotqa_train', 'musique', '2wikimultihopqa', 'nq', 'popqa']] = _RUNTIME_DEFAULTS["dataset"]
+    dataset: Optional[Literal['hotpotqa', 'hotpotqa_train', 'musique', '2wikimultihopqa', 'hover', 'nq', 'popqa']] = _RUNTIME_DEFAULTS["dataset"]
     corpus_len: Optional[int] = _RUNTIME_DEFAULTS["corpus_len"]
     llm_prefetch_workers: int = _RUNTIME_DEFAULTS["llm_prefetch_workers"]
 

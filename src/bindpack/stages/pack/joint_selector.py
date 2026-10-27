@@ -122,7 +122,8 @@ def _has_body_quote(span, source):
     return len(source[max(span["start"], boundary + 1):span["end"]].strip()) >= MIN_QUOTE_CHARS
 
 
-def apply_joint_selection(query, order, state, document, response, finish_reason="stop"):
+def apply_joint_selection(query, order, state, document, response, finish_reason="stop",
+                          require_explanations=True):
     """Validate one proposal and swap existing IDs while retaining fixed prefixes."""
     original = [int(d) for d in order]
     diag = {"enabled": True, "policy": "llm_joint_question_constraint_selection",
@@ -170,8 +171,9 @@ def apply_joint_selection(query, order, state, document, response, finish_reason
         return abstain("invalid_confidence")
     if not MIN_CONFIDENCE <= value <= 1.:
         return abstain("low_or_out_of_range_confidence")
+    explanation_keys = ("missing_condition", "reason") if require_explanations else ("missing_condition",)
     if not all(isinstance(swap.get(k), str) and len(swap[k].strip()) >= 8
-               for k in ("missing_condition", "reason")):
+               for k in explanation_keys):
         return abstain("missing_condition_or_redundancy_explanation")
     candidate_source, root_source = str(document(promote)), str(document(root))
     # Validate only text visible in the prompt; invisible continuations cannot
@@ -191,8 +193,10 @@ def apply_joint_selection(query, order, state, document, response, finish_reason
     final[a], final[b] = final[b], final[a]
     diag["promotions"] = [{"doc_id": promote, "victim": replace, "root_doc_id": root,
                            "from_rank": a + 1, "to_rank": b + 1, "confidence": value,
-                           "missing_condition": swap["missing_condition"], "reason": swap["reason"],
+                           "missing_condition": swap["missing_condition"], "reason": swap.get("reason"),
                            "candidate_quote": candidate_span, "root_quote": root_span}]
+    if not require_explanations:
+        diag["explanation_suffix_required"] = False
     diag.update(top2_preserved=final[:FIXED_K] == original[:FIXED_K],
                 top10_set_preserved=set(final[:TOP_K]) == set(original[:TOP_K]),
                 suffix_preserved=final[TOP_K:] == original[TOP_K:],

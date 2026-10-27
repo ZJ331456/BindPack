@@ -54,7 +54,8 @@ def fixture(semantic=True, protect_victim=False, context_overflow=False, error=N
         bindings['s2'] = 'Another Town'
         proofs['s2'] = {'doc_id': 4, 'answer': 'Another Town', 'evidence': documents[4].partition('\n')[2]}
     trace = {'plan': plan, 'bindings': bindings, 'branch_scores': [{'bindings': bindings, 'proofs': proofs}]}
-    cfg = BindPackConfig(llm_prefetch_workers=2, max_new_tokens=2048)
+    cfg = BindPackConfig.from_file(llm_prefetch_workers=2, max_new_tokens=2048,
+                                  pack={'selector_mode':'current','review_mode':'standard'})
     cfg.pack.review_context_length = 8192
     cfg.pack.review_tokenizer = '/unused/local/model'
     llm = FakeLLM(semantic, error)
@@ -99,7 +100,26 @@ class FinalSupportSemanticTests(unittest.TestCase):
         self.assertIn(4, diag['support_guard']['protected_source_doc_ids'])
         self.assertIs(solution.docs, old_docs)
         self.assertEqual(stats['support_vetoes'], 1)
-        self.assertEqual(len(llm.calls), 2)
+        self.assertEqual(stats['semantic_vetoes'], 0)
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIsNone(diag['llm_stages']['reviewer']['output'])
+        self.assertFalse(diag['independent_verification']['review_requested'])
+
+    def test_all_replacement_positions_protected_skip_both_model_requests(self):
+        runtime, solution, llm, documents = fixture()
+        titles = ('Alpha Example', 'Beta Example', 'Gamma Example')
+        for doc_id, title in zip((2, 3, 4), titles):
+            documents[doc_id] = title + '\nThis is a literal source article.'
+            solution.docs[doc_id] = documents[doc_id]
+        solution.question = QUERY + ' ' + ', '.join(titles) + '.'
+        old_docs, old_scores = solution.docs, solution.doc_scores
+        stats = module.postprocess_support_semantic_veto(runtime, [(solution, list(range(20)))])
+        diag = solution.retrieval_trace['evidence']['improvement_support_semantic_veto']
+        self.assertIs(solution.docs, old_docs)
+        self.assertIs(solution.doc_scores, old_scores)
+        self.assertEqual(llm.calls, [])
+        self.assertEqual(stats['logical_extra_requests'], 0)
+        self.assertEqual(diag['base_proposal']['abstain_reason'], 'all_replacement_positions_protected')
 
     def test_terminal_http_error_propagates(self):
         runtime, solution, _, _ = fixture(error=ConnectionError('HTTP unavailable'))

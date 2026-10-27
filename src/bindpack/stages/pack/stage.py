@@ -18,9 +18,14 @@ class PackStage:
 
     def finalize(self, query, ids, scores, context, state):
         result = self.coverage.select(query, ids, scores, context, state)
-        if self.runtime.cfg.stage_ablation in {"wo_plan", "wo_pack"}:
+        if self.runtime.cfg.stage_ablation == "wo_pack":
             return result
-        return self.dag_selector.select(result, state)
+        if self.runtime.cfg.stage_ablation != "wo_plan":
+            result = self.dag_selector.select(result, state)
+        if self.runtime.cfg.pack.selector_mode != "current":
+            from .budgeted_selector import BudgetedSelector
+            result = BudgetedSelector(self.runtime, self.scorer).select(query, ids, scores, result, state)
+        return result
 
     def postprocess(self, inputs):
         if self.runtime.cfg.stage_ablation == "wo_pack":

@@ -90,6 +90,14 @@ class DependencyExecutor:
                     hyp["quality"] = float(0.6 * self.runtime.rank_constant / (self.runtime.rank_constant + local_rank)
                                            + 0.4 * hyp["confidence"])
                 hypotheses.sort(key=lambda h: (-h["quality"], h["doc_id"], normalized_text(h["answer"])))
+                # Preserve returned source alternatives without changing the
+                # selected answer branch or making another verification call.
+                requirements = dict(state["_evidence_beams"][beam_index]["bindings"])
+                if (getattr(self.runtime, 'capture_source_alternatives', False) or
+                        getattr(self.runtime.cfg.pack, 'selector_mode', 'current') != 'current'):
+                    trace.setdefault("source_records", []).extend(
+                        dict(hyp, goal=f"dag:{node['id']}", requirements=requirements)
+                        for hyp in hypotheses)
                 # Keep at most one proof per answer hypothesis to avoid a fake beam of duplicates.
                 unique, seen = [], set()
                 for hyp in hypotheses:

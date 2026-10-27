@@ -57,13 +57,23 @@ class CoverageSelector:
         relation_weight = float(self.config.relation_weight)
         redundancy_weight = float(self.config.redundancy_weight)
         document_tokens = {d: set(normalized_text(self.runtime._document(d)).split()) for d in remaining}
+        verified_goals = {d: {p["goal"] for p in candidates[d]["verified"]} for d in remaining}
+        selected_verified = set()
         for position in range(min(self.config.budget, len(remaining))):
             ranked = []
             for doc_id in remaining:
                 goals = goal_by_id[doc_id]
                 gain = sum(max(0.0, score - covered.get(goal, 0.0)) for goal, score in goals.items()) / goal_total
                 tokens = document_tokens[doc_id]
-                redundancy = max_token_redundancy(tokens, selected_tokens)
+                redundancy = 0.0
+                if not (verified_goals[doc_id] - selected_verified):
+                    for previous, previous_tokens in zip(selected, selected_tokens):
+                        previous_goals = goal_by_id[previous]
+                        union = set(goals) | set(previous_goals)
+                        denominator = sum(max(goals.get(g, 0.0), previous_goals.get(g, 0.0)) for g in union)
+                        overlap = (sum(min(goals.get(g, 0.0), previous_goals.get(g, 0.0)) for g in union)
+                                   / denominator) if denominator else 1.0
+                        redundancy = max(redundancy, overlap * max_token_redundancy(tokens, [previous_tokens]))
                 relation = max(goals.values(), default=0.0)
                 utility = (base_weight * base_by_id.get(doc_id, candidates[doc_id]["base_score"])
                            + relation_weight * relation + coverage_weight * gain
@@ -72,6 +82,7 @@ class CoverageSelector:
             utility, _score, _tie, gain, redundancy, chosen = max(ranked)
             selected.append(chosen)
             selected_tokens.append(document_tokens[chosen])
+            selected_verified.update(verified_goals[chosen])
             remaining.remove(chosen)
             for goal, score in goal_by_id[chosen].items():
                 covered[goal] = max(covered.get(goal, 0.0), score)

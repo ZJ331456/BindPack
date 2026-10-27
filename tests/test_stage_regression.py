@@ -1,7 +1,9 @@
-"""Frozen pre-refactor Full replay, recorded before moving the stage code.
+"""Explicit original-selector control at relevance weight 0.60.
 
-The digests cover original prompts and the complete Plan/Pack trace as well as
-the exact returned ranking and scores. No model or old checkout is required.
+The digests cover prompts and the complete Plan/Pack trace as well as the exact
+returned ranking and scores. The trace baseline was checked against the immutable
+measured source snapshot preceding the optional suffix-stop implementation.
+No model or old checkout is required.
 """
 import copy
 import hashlib
@@ -18,7 +20,8 @@ from bindpack.pipeline import EvidencePipeline as Engine
 
 class FrozenRAG:
     def __init__(self):
-        self.config = BindPackConfig()
+        self.config = BindPackConfig.from_file(pack={'selector_mode': 'current'})
+        self.config.pack.relation_weight = .6
         self.config.pack.budget = 2
         self.passage_node_keys = ['d0', 'd1', 'd2', 'd3']
         self.documents = {
@@ -94,7 +97,7 @@ class FullStageRegressionTests(unittest.TestCase):
         self.assertEqual(normalized_trace.pop("stages"), {"route": True, "plan": True, "pack": True})
         normalized_trace["stage"] = 4
         self.assertEqual(digest(normalized_trace),
-                         '266dd718656537aec920e057c8d70a12c5b90f0740ac5d4801524aeff19b43b0')
+                         '8167034a361c55f165414648a6b85d78ec5b90500558a2af7e6b7f5d2a45cb17')
         self.assertEqual(digest(rag.calls),
                          '8d7756b19084052e4a54f5f5ea6ad5f90ec4ea03028d504e2f3eb78488acd18d')
 

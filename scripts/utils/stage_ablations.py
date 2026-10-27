@@ -21,7 +21,8 @@ import time
 import urllib.request
 
 from eval_utils import (build_docs_from_full_corpus, build_docs_from_samples,
-                        get_benchmark_hops, get_gold_docs)
+                        get_benchmark_hops, get_gold_docs, describe_benchmark_hops,
+                        get_query_text, get_sample_id, get_gold_answers, get_dataset_task)
 from report_metrics import write_metric_report
 from utils.reporting_protocol import persist_reporting_receipt, resolve_existing_protocol
 
@@ -29,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CASES = ("full", "wo_route", "wo_plan", "wo_pack")
 HIPPO_CASE = "hippporag2_reproduce"
 BASELINE_MAIN = ROOT.parent / "baseline" / "HippoRAG" / "main.py"
-DATASETS = ("hotpotqa", "2wikimultihopqa", "musique", "nq", "popqa")
+DATASETS = ("hotpotqa", "2wikimultihopqa", "musique", "hover", "nq", "popqa")
 LOG = logging.getLogger("bindpack.stage_ablations")
 
 
@@ -113,6 +114,12 @@ def prepare_context(config, dataset, args, output, *, batch=None):
     if not isinstance(samples, list) or not samples:
         raise ValueError(f"Empty/invalid benchmark: {data_path}")
     hops = get_benchmark_hops(samples, dataset)
+    for sample in samples:
+        get_query_text(sample, dataset)
+    if dataset == "hover":
+        for sample in samples:
+            get_sample_id(sample, dataset)
+        get_gold_answers(samples, dataset)  # validate native targets before model calls
     evaluation = config["evaluation"]
     size = args.sample_size if args.sample_size is not None else evaluation[
         "smoke_sample_size" if args.smoke else "sample_size"]
@@ -137,9 +144,14 @@ def prepare_context(config, dataset, args, output, *, batch=None):
         "corpus_source_sha256": None if small_corpus else sha256(corpus_path),
         "corpus_docs_sha256": digest(docs), "corpus_docs": len(docs),
         "gold_completion_added": len(missing), "selected_indices": indices,
-        "sample_ids": [sample.get("id", sample.get("_id", index)) for index, sample in zip(indices, subset)],
+        "sample_ids": [
+            get_sample_id(sample, dataset) if dataset == "hover"
+            else sample.get("id", sample.get("_id", index))
+            for index, sample in zip(indices, subset)
+        ],
         "benchmark_hops": [hops[index] for index in indices],
-        "hop_policy": "MuSiQue oracle decomposition length" if dataset == "musique" else "dataset prior",
+        "hop_policy": describe_benchmark_hops(samples, dataset),
+        "task": get_dataset_task(dataset),
         "corpus_mode": "selected_sample_contexts" if small_corpus else "full",
     }
     context = {"identity": identity, "corpus": rows, "metadata": metadata,
@@ -150,9 +162,61 @@ def prepare_context(config, dataset, args, output, *, batch=None):
     return context
 
 
+def _json_serialization_equivalence(manifest, identity):
+    """Allow formatting changes only when both complete JSON values are exact.
+
+    Historical byte fingerprints remain authoritative: the recorded original
+    files must still exist and match them.  No strings, passage identities,
+    sample fields or array order are normalized for this comparison.
+    """
+    receipt = {"kind": "exact_json_value_equivalence"}
+    for name, old_path_key, old_sha_key, new_path_key, new_sha_key in (
+        ("data", "data_path", "data_sha256", "data_path", "data_sha256"),
+        ("corpus", "corpus_path", "corpus_sha256", "corpus_source", "corpus_source_sha256"),
+    ):
+        pairs = {}
+        values = {}
+        for version, source, path_key, sha_key in (
+            ("original", manifest, old_path_key, old_sha_key),
+            ("current", identity, new_path_key, new_sha_key),
+        ):
+            path_text = source.get(path_key)
+            if not isinstance(path_text, str) or not path_text or not Path(path_text).is_absolute():
+                raise ValueError(f"{name} {version} source path is unavailable")
+            raw_path = Path(path_text)
+            path = raw_path.resolve()
+            if raw_path.is_symlink() or not path.is_file():
+                raise ValueError(f"{name} {version} source is not a regular independent file: {raw_path}")
+            expected = source.get(sha_key)
+            actual = sha256(path)
+            if actual != expected:
+                raise ValueError(f"{name} {version} source byte fingerprint changed: {path}")
+            value = read_json(path)
+            semantic = digest(value)
+            pairs[version] = {"path": str(path), "sha256": actual, "json_sha256": semantic}
+            values[version] = semantic
+        if values["original"] != values["current"]:
+            raise ValueError(f"{name} complete JSON values differ; rebuild or use the matching index")
+        receipt[name] = pairs
+    return receipt
+
+
 def validate_shared_index(context, config):
     """Read historical provenance and assets without changing an old index."""
     index, identity, runtime = context["index"], context["identity"], config["runtime"]
+    archive_manifest=index.parent.parent/'manifest.json'
+    if archive_manifest.is_file() and isinstance(read_json(archive_manifest).get('files'),list):
+        # Merged four-dataset archives carry a full immutable asset inventory,
+        # rather than the original runner's metadata/<dataset>/manifest.json.
+        from utils.archived_index import validate_archive
+        documents=[row['title']+'\n'+row['text'] for row in context['corpus']]
+        if digest(documents)!=identity['corpus_docs_sha256']:
+            raise ValueError('Canonical archive passage serialization differs from the current corpus')
+        proof=validate_archive(index,identity['dataset'],documents,
+                               runtime['embedding_model_name'],runtime['llm_name'])
+        return {'source_index':str(index),'manifest_sha256':proof['archive_inventory_sha256'],
+                'assets':{name:info['sha256'] for name,info in proof['assets'].items()},
+                'provenance':'verified_merged_archive','archive_validation':proof}
     source_metadata = index.parent.parent / "metadata" / identity["dataset"]
     manifest_path = source_metadata / "manifest.json"
     manifest = read_json(manifest_path)
@@ -167,10 +231,15 @@ def validate_shared_index(context, config):
             or index_manifest.get("embedding", {}).get("model_name") != runtime["embedding_model_name"]
             or index_manifest.get("openie", {}).get("identity", {}).get("model_name") != runtime["llm_name"]):
         raise ValueError(f"Shared index model/dataset identity mismatch: {index}")
-    if (manifest.get("data_sha256") != identity["data_sha256"]
-            or manifest.get("corpus_sha256") != identity["corpus_source_sha256"]
-            or manifest.get("indexed_docs") != identity["corpus_docs"]):
+    if manifest.get("indexed_docs") != identity["corpus_docs"]:
         raise ValueError(f"Shared index corpus/benchmark identity mismatch: {index}")
+    equivalence = None
+    if (manifest.get("data_sha256") != identity["data_sha256"]
+            or manifest.get("corpus_sha256") != identity["corpus_source_sha256"]):
+        try:
+            equivalence = _json_serialization_equivalence(manifest, identity)
+        except (OSError, ValueError, TypeError) as error:
+            raise ValueError(f"Shared index corpus/benchmark identity mismatch: {index}; {error}") from error
     selected_path = source_metadata / "selected_indices.json"
     old_indices = read_json(selected_path)
     old_ids = manifest.get("selected_sample_ids", [])
@@ -186,9 +255,12 @@ def validate_shared_index(context, config):
     original = manifest.get("source_asset_sha256", {})
     if any(original.get(relative) != assets.get(str(Path(model.name) / relative)) for relative in required):
         raise ValueError(f"Shared index assets differ from the historical manifest: {index}")
-    return {"source_index": str(index), "manifest_sha256": sha256(manifest_path),
-            "selected_indices_sha256": sha256(selected_path),
-            "index_manifest_sha256": sha256(index_manifest_path), "assets": assets}
+    receipt = {"source_index": str(index), "manifest_sha256": sha256(manifest_path),
+               "selected_indices_sha256": sha256(selected_path),
+               "index_manifest_sha256": sha256(index_manifest_path), "assets": assets}
+    if equivalence is not None:
+        receipt["serialization_equivalence"] = equivalence
+    return receipt
 
 
 def command(config, context, directory, stage="full", *, index_only=False):
@@ -552,6 +624,9 @@ def main(argv=None):
         raise ValueError("Select unique supported datasets")
     if (args.data_path or args.corpus_path) and len(datasets) != 1:
         raise ValueError("--data-path/--corpus-path require one dataset")
+    if config["include_hipporag"] and "hover" in datasets:
+        raise ValueError("The external HippoRAG reproduction does not support HoVer fact verification; "
+                         "run HoVer with run_bindpack_ablations_qwen3.sh without --include-hipporag")
     runtime = config["runtime"]
     if "Qwen3-Embedding-8B" not in runtime["embedding_model_name"]:
         raise ValueError("This experiment uses Qwen3-Embedding-8B; another embedding requires a separate workflow")

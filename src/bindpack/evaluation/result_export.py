@@ -13,7 +13,7 @@ def detailed_result(solution, sample, query_index, gold_docs, benchmark_hops=Non
         for k in (1, 2, 5, 10, 20, 200)
     }
     row.update(
-        query_index=int(query_index), sample_id=sample.get("id", sample.get("_id", query_index)),
+        query_index=int(query_index), sample_id=sample.get("hover_id", sample.get("id", sample.get("_id", query_index))),
         benchmark_hops=benchmark_hops, gold_docs=gold,
         candidate_docs=candidates,
         candidate_doc_scores=[float(v) for v in scores[:candidate_output_top_k]] if scores is not None else [],

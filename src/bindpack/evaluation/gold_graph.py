@@ -65,7 +65,7 @@ def gold_documents_from_sample(sample: Mapping[str, Any], dataset_name: str) -> 
                     continue
                 if not isinstance(sentences, list) or any(not isinstance(s, str) for s in sentences):
                     raise ValueError("invalid_context_sentences")
-                separator = "" if dataset_name.startswith("hotpotqa") else " "
+                separator = "" if dataset_name.startswith("hotpotqa") or dataset_name == "hover" else " "
                 docs.append(title + "\n" + separator.join(sentences))
                 resolved.add(title)
             if resolved != titles:
@@ -179,7 +179,7 @@ def build_gold_graph(sample: Mapping[str, Any], dataset_name: str,
     """
     if dataset_name != "musique":
         reason = ("dataset_has_no_verified_gold_dependency_graph"
-                  if dataset_name in {"hotpotqa", "2wikimultihopqa", "nq", "popqa"}
+                  if dataset_name in {"hotpotqa", "2wikimultihopqa", "hover", "nq", "popqa"}
                   else "unsupported_gold_graph_dataset")
         return _invalid_graph(reason, dataset_name)
     steps = sample.get("question_decomposition")

@@ -4,7 +4,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RAG_PYTHON="${RAG_PYTHON:-/root/anaconda3/envs/rag/bin/python}"
-SHARED_INDEX_ROOT="${SHARED_INDEX_ROOT:-${ROOT}/outputs/3multi_hop_datasets_results_10_5/shared_indexes}"
+SHARED_INDEX_ROOT="${SHARED_INDEX_ROOT:-${ROOT}/outputs/4_datasets_result/shared_indexes}"
+# The merged archive is immutable; fresh runs must not default to its case tree.
+OUT_ROOT="${OUT_ROOT:-${ROOT}/outputs/four_cases_reuse_$(date +%Y%m%d_%H%M%S)}"
 export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=42
 export TOKENIZERS_PARALLELISM=false OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 

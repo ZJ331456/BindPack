@@ -3,7 +3,7 @@
   "method_config": "src/bindpack/configuration/defaults.json",
   "cases": ["full", "wo_route", "wo_plan", "wo_pack"],
   "datasets": ["hotpotqa", "2wikimultihopqa", "musique"],
-  "datasets_dir": "/root/datasets",
+  "datasets_dir": "/root/BindPack/datasets",
   "runtime": {
     "python": "/root/anaconda3/envs/rag/bin/python",
     "runtime_deps": "/root/.cache/pathcondrag/runtime_deps_qwen3_tf4513",

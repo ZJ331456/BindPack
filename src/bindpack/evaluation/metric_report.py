@@ -20,6 +20,7 @@ from .structural_metrics import evaluate_structural_metrics
 REPORT_VERSION = "bindpack-metric-report-v1"
 DEFAULT_KS = (5, 10, 20, 200)
 CURRENT_CASES = ("full", "wo_route", "wo_plan", "wo_pack", "hippporag2_reproduce")
+HOVER_LABELS = ("SUPPORTED", "NOT_SUPPORTED")
 
 
 def _read(path):
@@ -127,7 +128,132 @@ def _normalize(answer):
     return " ".join(re.sub(r"\b(a|an|the)\b", " ", value).split())
 
 
+def normalize_hover_prediction(prediction):
+    """Accept one complete native label, never infer a label from prose."""
+    if prediction is None:
+        return None
+    if not isinstance(prediction, str):
+        raise ValueError("HoVer prediction must be a string")
+    label = prediction.strip().upper()
+    return label if label in HOVER_LABELS else None
+
+
+def parse_hover_reader_response(response):
+    """Decode one native label or the reader's exact JSON transport schema.
+
+    Transport decoding is separate from label scoring: exported predictions
+    remain atomic labels. Prose, extra object keys, lists, and invented label
+    aliases are not searched or rescued into a classification.
+    """
+    text = response if isinstance(response, str) else str(response)
+    text = text.strip()
+    label = normalize_hover_prediction(text)
+    if label is not None:
+        return label
+    try:
+        value = json.loads(text)
+    except (ValueError, TypeError):
+        return text
+    if isinstance(value, dict) and set(value) == {"answer"} and isinstance(value["answer"], str):
+        label = normalize_hover_prediction(value["answer"])
+        if label is not None:
+            return label
+    return text
+
+
+def score_hover_classification(predictions, gold_labels):
+    """Score native HoVer labels, counting invalid outputs as failures.
+
+    ``ExactMatch`` and ``F1`` are legacy answer-metric fields for atomic label
+    agreement, both equal to accuracy. ``ClassificationMacroF1`` is the actual
+    unweighted F1 over the two native classes, including false negatives caused
+    by invalid outputs. Gold labels must retain their native exact spelling.
+    This CPU-only helper is shared by online exports and offline reports.
+    """
+    if len(predictions) != len(gold_labels):
+        raise ValueError("HoVer predictions and labels must have equal length")
+    confusion = {label: {predicted: 0 for predicted in (*HOVER_LABELS, "INVALID")}
+                 for label in HOVER_LABELS}
+    details = []
+    for prediction, gold in zip(predictions, gold_labels):
+        if not isinstance(gold, str) or gold not in HOVER_LABELS:
+            raise ValueError(f"Invalid native HoVer label: {gold!r}")
+        predicted = normalize_hover_prediction(prediction)
+        confusion[gold][predicted or "INVALID"] += 1
+        correct = float(predicted == gold)
+        details.append({"valid": True, "reason": None, "ExactMatch": correct, "F1": correct,
+                        "gold_label": gold, "predicted_label": predicted,
+                        "prediction_valid": predicted is not None,
+                        "empty_prediction": prediction is None or not prediction.strip()})
+    count = len(details)
+    accuracy = sum(item["ExactMatch"] for item in details) / count if count else None
+    per_label = {}
+    for label in HOVER_LABELS:
+        true_positive = confusion[label][label]
+        false_positive = sum(confusion[gold][label] for gold in HOVER_LABELS if gold != label)
+        false_negative = sum(value for predicted, value in confusion[label].items() if predicted != label)
+        denominator = 2 * true_positive + false_positive + false_negative
+        per_label[label] = {
+            "support": sum(confusion[label].values()), "true_positive": true_positive,
+            "false_positive": false_positive, "false_negative": false_negative,
+            "precision": (true_positive / (true_positive + false_positive)
+                          if true_positive + false_positive else (0.0 if count else None)),
+            "recall": (true_positive / (true_positive + false_negative)
+                       if true_positive + false_negative else (0.0 if count else None)),
+            "F1": 2 * true_positive / denominator if denominator else (0.0 if count else None),
+        }
+    metrics = {"ExactMatch": accuracy, "F1": accuracy, "ClassificationAccuracy": accuracy,
+               "ClassificationMacroF1": (sum(item["F1"] for item in per_label.values()) / len(HOVER_LABELS)
+                                         if count else None)}
+    coverage = {
+        "qa_n": count, "qa_unavailable_reasons": {},
+        "empty_prediction_count": sum(item["empty_prediction"] for item in details),
+        "classification": {"task": "binary_claim_verification", "labels": list(HOVER_LABELS),
+            "n": count, "invalid_prediction_count": sum(not item["prediction_valid"] for item in details),
+            "confusion_matrix": confusion, "confusion_orientation": "gold_rows_predicted_columns",
+            "per_label": per_label, "zero_division": 0},
+    }
+    return metrics, coverage, details
+
+
+def _hover_qa(rows, samples, result):
+    labels = [sample.get("label") for sample in samples]
+    for row, label in zip(rows, labels):
+        if not isinstance(label, str) or label not in HOVER_LABELS:
+            raise ValueError(f"Invalid native HoVer label: {label!r}")
+        exported = row.get("gold_answers")
+        if exported not in (None, []) and exported != [label]:
+            raise ValueError(f"Exported answer labels differ from benchmark: {row.get('sample_id')}")
+    if result.get("eval_mode") == "rag_qa":
+        return score_hover_classification([row.get("answer") for row in rows], labels)
+    metrics, coverage, _ = score_hover_classification([], [])
+    coverage["qa_unavailable_reasons"] = {"answer_generation_not_run": len(rows)}
+    details = [{"valid": False, "reason": "answer_generation_not_run", "ExactMatch": None, "F1": None}
+               for _ in rows]
+    return metrics, coverage, details
+
+
+def _sample_identity(sample, index, dataset_name):
+    if dataset_name == "hover":
+        sample_id = sample.get("hover_id")
+        if not isinstance(sample_id, str) or not sample_id.strip():
+            raise ValueError("HoVer sample lacks a valid native hover_id")
+        return sample_id
+    return sample.get("id", sample.get("_id", index))
+
+
+def _sample_question(sample, dataset_name):
+    if dataset_name == "hover":
+        claim = sample.get("claim")
+        if not isinstance(claim, str) or not claim.strip():
+            raise ValueError("HoVer sample lacks a valid claim")
+        return claim
+    return sample.get("question", sample.get("query"))
+
+
 def _qa(rows, samples, result):
+    if result.get("dataset") == "hover":
+        return _hover_qa(rows, samples, result)
     details, scores, reasons = [], [], Counter()
     qa_run = result.get("eval_mode") == "rag_qa"
     for row, sample in zip(rows, samples):
@@ -180,8 +306,8 @@ def _standalone_inputs(result, data_path):
     samples = [data[index] for index in indices]
     for row, sample, index in zip(rows, samples, indices):
         if (row.get("query_index") != index or
-                row.get("sample_id") != sample.get("id", sample.get("_id", index)) or
-                row.get("question") != sample.get("question", sample.get("query"))):
+                row.get("sample_id") != _sample_identity(sample, index, result.get("dataset")) or
+                row.get("question") != _sample_question(sample, result.get("dataset"))):
             raise ValueError("Standalone result IDs/order/questions differ from benchmark")
     paths, docs = {"benchmark": data_path}, None
     if result.get("corpus_path") and Path(result["corpus_path"]).is_file():
@@ -219,13 +345,13 @@ def _load_frozen_inputs(result_path, result, data_path, manifest_path, allow_sta
             or any(type(index) is not int or not 0 <= index < len(data) for index in indices)):
         raise ValueError("Invalid or mismatched result/sample-manifest index sequence")
     samples = [data[index] for index in indices]
-    sample_ids = [sample.get("id", sample.get("_id", index))
+    sample_ids = [_sample_identity(sample, index, result.get("dataset"))
                   for sample, index in zip(samples, indices)]
     if (identity.get("sample_ids") != sample_ids or
             [row.get("sample_id") for row in rows] != sample_ids or
             [row.get("query_index") for row in rows] != indices):
         raise ValueError("Result sample IDs/order differ from frozen benchmark")
-    if any(row.get("question") != sample.get("question", sample.get("query"))
+    if any(row.get("question") != _sample_question(sample, result.get("dataset"))
            for row, sample in zip(rows, samples)):
         raise ValueError("Result question text differs from frozen benchmark")
     corpus_path = manifest_path.parent / "corpus.json"
@@ -349,6 +475,16 @@ def _write_metric_report_unlocked(result_path, *, data_path=None, manifest_path=
         "original_exported_metrics": {"retrieval": result.get("retrieval_metrics", {}),
                                       "qa": result.get("qa_metrics", {})},
         "details": {"path": details_path.name, "sha256": _sha256(details_path)}}
+    if result["dataset"] == "hover":
+        report["protocol"].update({
+            "answer_task": "binary_claim_verification",
+            "qa": "native SUPPORTED/NOT_SUPPORTED labels; trim/case-normalized whole-label predictions only; "
+                  "invalid outputs are failures; legacy ExactMatch/F1 mean atomic-label agreement",
+            "aggregation": "structural metrics and label accuracy: query macro average; "
+                           "ClassificationMacroF1: unweighted mean of both native class F1 scores",
+            "classification_gold": "native label only; hotpotqa_answer is not a label or alias",
+            "classification_label_semantics": "NOT_SUPPORTED means not supported; it does not assert counterevidence",
+        })
     _atomic_write(report_path, report)
     return report
 

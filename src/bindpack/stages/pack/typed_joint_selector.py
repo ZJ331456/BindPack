@@ -74,7 +74,8 @@ def build_joint_prompt(query, order, state, document):
     return None if _typed_reason(query, state) else _build(query, order, state, document)
 
 
-def apply_joint_selection(query, order, state, document, response, finish_reason="stop"):
+def apply_joint_selection(query, order, state, document, response, finish_reason="stop",
+                          require_explanations=True):
     """Apply the same frozen proposal only when its target passes the typed gate."""
     reason = _typed_reason(query, state)
     if reason:
@@ -87,7 +88,8 @@ def apply_joint_selection(query, order, state, document, response, finish_reason
             "suffix_preserved": True, "document_set_preserved": True,
             "protected_proofs_preserved": True,
         }
-    final, diagnostic = _apply(query, order, state, document, response, finish_reason)
+    final, diagnostic = _apply(query, order, state, document, response, finish_reason,
+                              require_explanations=require_explanations)
     diagnostic = dict(diagnostic, typed_scope_guard="recognized_non_atomic_targets",
                       matched_reason=None)
     return final, diagnostic
