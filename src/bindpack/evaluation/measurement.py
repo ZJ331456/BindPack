@@ -89,7 +89,18 @@ class Recorder:
             os.fsync(handle.fileno())
 
     def tags(self):
-        return dict(phase=self.phase, query_id=self.query_id)
+        override = getattr(self.local, "tag_override", None)
+        return dict(override) if override is not None else dict(phase=self.phase, query_id=self.query_id)
+
+    @contextmanager
+    def thread_section(self, phase, query_id):
+        """Attribute concurrent Reader requests without changing another thread's tags."""
+        previous = getattr(self.local, "tag_override", None)
+        self.local.tag_override = dict(phase=phase, query_id=query_id)
+        try:
+            yield
+        finally:
+            self.local.tag_override = previous
 
     @contextmanager
     def section(self, phase, query_id=None):
@@ -131,6 +142,8 @@ class Recorder:
                     completion_tokens=getattr(data, "completion_tokens", None),
                     response_id=getattr(response, "id", None),
                     finish_reason=response.choices[0].finish_reason)
+                if data is not None and hasattr(data, 'model_dump'):
+                    event['usage_details'] = data.model_dump(mode='json')
                 return response
             except Exception as exc:
                 event.update(error_type=type(exc).__name__, error=str(exc)[:500])
@@ -147,13 +160,15 @@ class Recorder:
             event = dict(self.tags(), call_id=call_id, status="error", cache_hit=None)
             messages = args[0] if args else kwargs.get("messages")
             event["prompt_sha256"] = digest(messages)
-            if self.phase == "online_reader":
+            if self.tags()['phase'] == "online_reader":
                 event["prompt_tokens_local"] = len(tokenizer.apply_chat_template(messages,
                     tokenize=True, add_generation_prompt=True, enable_thinking=False))
             start = time.perf_counter()
             try:
                 response = original_infer(*args, **kwargs)
                 event.update(status="success", cache_hit=bool(response[2]), metadata=response[1])
+                if isinstance(response[1], dict) and response[1].get('provider_rejected'):
+                    event['outcome'] = 'provider_rejected_abstention'
                 return response
             except Exception as exc:
                 event.update(error_type=type(exc).__name__, error=str(exc)[:500])
@@ -181,7 +196,7 @@ class Recorder:
         def encode(texts, **kwargs):
             values = [texts] if isinstance(texts, str) else list(texts)
             instruction = kwargs.get("instruction", "") or ""
-            if instruction:
+            if instruction and getattr(embedding, 'uses_query_instruction', True):
                 prefix = f"Instruct: {instruction}\nQuery:" if embedding._is_qwen3_embedding else f"Instruct: {instruction}\nQuery: "
                 values = [prefix + text for text in values]
             lengths = [len(ids) for ids in tokenizer(values, truncation=False,
@@ -214,6 +229,17 @@ class Recorder:
 
     def install_index(self, rag):
         self.time_method(rag.openie, "batch_openie", "openie")
+        # Worker threads need passage identities for sampled-index cost estimates.
+        # Keep the native calls/arguments/recovery policy unchanged.
+        for name in ('ner', 'triple_extraction', 'recover_pending_ner', 'recover_pending_triples'):
+            original = getattr(rag.openie, name, None)
+            if original is None:
+                continue
+            def attributed(*args, _original=original, **kwargs):
+                chunk_id = args[0] if args else kwargs.get('chunk_key')
+                with self.thread_section(self.phase, chunk_id):
+                    return _original(*args, **kwargs)
+            self.replace(rag.openie, name, attributed)
         for name in ("chunk", "entity", "fact"):
             self.time_method(getattr(rag, name + "_embedding_store"), "insert_strings", name + "_embedding_and_store")
         for name in ("add_fact_edges", "add_passage_edges", "add_synonymy_edges",

@@ -20,7 +20,7 @@ from bindpack.pipeline import EvidencePipeline as Engine
 
 class FrozenRAG:
     def __init__(self):
-        self.config = BindPackConfig.from_file(pack={'selector_mode': 'current'})
+        self.config = BindPackConfig.from_file(source_bound_eligibility=True,pack={'selector_mode': 'current'})
         self.config.pack.relation_weight = .6
         self.config.pack.budget = 2
         self.passage_node_keys = ['d0', 'd1', 'd2', 'd3']

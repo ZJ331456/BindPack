@@ -36,6 +36,13 @@ class DefaultJointPackTests(unittest.TestCase):
         self.assertEqual(default.pack.joint_state_cap,4096)
         self.assertEqual(default.pack.joint_search_seconds,5.0)
         self.assertEqual(default.pack.budget,5)
+        self.assertFalse(default.source_bound_eligibility)
+        from bindpack.stages.mechanisms import mechanisms
+        self.assertFalse(mechanisms(default).source_bound_eligibility)
+        dependency=BindPackConfig.from_file(root/'configs/mechanism_wo_dependency_closure.json')
+        self.assertFalse(mechanisms(dependency).source_bound_eligibility)
+        self.assertFalse(mechanisms(dependency).dependency_closure)
+        self.assertTrue(mechanisms(dependency).joint_selection)
 
     def test_default_full_executes_joint_selection_with_zero_review_requests(self):
         runtime,state,llm=self.runtime();pack=PackStage(runtime)

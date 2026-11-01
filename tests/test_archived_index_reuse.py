@@ -66,6 +66,36 @@ class ArchivedIndexTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'configuration mismatch'):
             A.prepare_archive(self.source,self.case/'index',self.case,{'dataset':'hover'},self.docs,self.config)
 
+    def test_online_model_replacement_retains_honest_original_extraction_identity(self):
+        self.config.llm_name='cloud-model'
+        receipt=A.prepare_archive(self.source,self.case/'index',self.case,{'dataset':'hover'},self.docs,self.config,
+            extraction_llm_name='llm')
+        self.assertEqual(receipt['models']['llm'],'llm')
+        self.assertEqual(receipt['online_llm'],'cloud-model')
+        self.assertEqual(receipt['extraction_llm'],'llm')
+        self.assertTrue((self.case/'index/cloud-model_embedding/graph.pickle').is_file())
+        self.assertTrue((self.case/'index/openie_results_ner_cloud-model.json').is_file())
+        manifest=A.read(self.case/'index/cloud-model_embedding/index_manifest.json')
+        self.assertEqual(manifest['openie']['identity']['model_name'],'llm')
+        A.verify_private(self.case)
+        with self.assertRaisesRegex(ValueError,'model mismatch'):
+            A.prepare_archive(self.source,self.case/'another-index',self.case,{'dataset':'hover'},self.docs,self.config)
+
+    def test_new_embedding_build_uses_audited_measurement_instead_of_unknown_history(self):
+        from bindpack.evaluation.measurement import digest
+        report=self.archive/'index_build/report.json'
+        A.write(report,dict(seconds=12.,corpus_sha256=digest(self.docs),offline_index_usage={'input_tokens':0}))
+        manifest=self.source/'llm_embedding/index_manifest.json';value=A.read(manifest)
+        value['build_measurement']={'path':'index_build/report.json','sha256':A.sha(report)};A.write(manifest,value)
+        entries=[dict(path=str(p.relative_to(self.archive)),bytes=p.stat().st_size,sha256=A.sha(p))
+                 for p in self.archive.rglob('*') if p.is_file() and p!=self.archive/'manifest.json']
+        A.write(self.archive/'manifest.json',dict(files=entries))
+        receipt=self.validate()
+        self.assertEqual(receipt['original_build_seconds'],12.)
+        self.assertEqual(receipt['original_build_usage'],{'input_tokens':0})
+        A.write(report,dict(seconds=1.,corpus_sha256=digest(self.docs),offline_index_usage={'input_tokens':0}))
+        with self.assertRaisesRegex(ValueError,'build measurement'):self.validate()
+
     def test_measured_protocol_can_certify_an_index_that_never_had_a_manifest(self):
         from bindpack.evaluation.measurement import digest
         manifest=self.source/'llm_embedding/index_manifest.json';manifest.unlink()

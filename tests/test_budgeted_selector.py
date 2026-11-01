@@ -11,7 +11,7 @@ from test_evidence_dag_package import Engine, chain
 
 class BudgetedTests(unittest.TestCase):
     def runtime(self, engine, mode='closed', visible=None):
-        cfg = BindPackConfig.from_file(pack={'selector_mode':mode,'joint_search_seconds':1.0,
+        cfg = BindPackConfig.from_file(source_bound_eligibility=True,pack={'selector_mode':mode,'joint_search_seconds':1.0,
                                            'joint_fixed_prefix':2,'joint_state_cap':2048})
         return SimpleNamespace(cfg=cfg,_document=engine._document,
             _joint_visible=visible or (lambda q, ids: ({d:engine._document(d) for d in ids},{})))

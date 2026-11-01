@@ -1,1 +1,1 @@
-{"runtime":{"mechanism_ablation":"wo_joint_selection"}}
+{"runtime":{"mechanism_ablation":"wo_joint_selection","source_bound_eligibility":false}}

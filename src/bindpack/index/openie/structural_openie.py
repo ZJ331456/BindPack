@@ -10,7 +10,7 @@ import json
 
 from .openie_openai import OpenIE
 from .openie_quality import TRIPLE_JSON_SCHEMA, validate_triples
-from .openie_structured_output import guided_json_parameters
+from .openie_structured_output import structured_request_parameters
 from ..extraction_utils import _base_generate_seed
 from ..ner.source_verified import SourceVerifiedNERMixin
 from ...utils.misc_utils import TripleRawOutput
@@ -130,6 +130,8 @@ class StructuralOpenIE(SourceVerifiedNERMixin, OpenIE):
         from .openie_semantic_validation import _prompt_tokens
         if not isinstance(passage, str):
             raise TypeError('Structural OpenIE requires the unchanged source string')
+        if _previous is not None and (_previous.metadata or {}).get('non_retryable'):
+            return _previous
         calls = self._prior_calls(_previous)
         history = copy.deepcopy((_previous.metadata or {}).get('structural_attempts') or []) if _previous else []
         response = _previous.response if _previous else ''
@@ -144,7 +146,8 @@ class StructuralOpenIE(SourceVerifiedNERMixin, OpenIE):
 
         configured = getattr(getattr(self.llm_model, 'llm_config', None), 'generate_params', {}) or {}
         parameters = {'max_completion_tokens': 2048, 'temperature': 0.0,
-                      'extra_body': guided_json_parameters(TRIPLE_JSON_SCHEMA, configured.get('extra_body'))}
+                      **structured_request_parameters(self.llm_model, TRIPLE_JSON_SCHEMA,
+                                                      configured.get('extra_body'))}
         while calls < RECOVERY_BUDGET:
             messages = self._triple_messages(passage, named_entities)
             if calls or error:
@@ -171,6 +174,10 @@ class StructuralOpenIE(SourceVerifiedNERMixin, OpenIE):
                 response, generated, hit = self.llm_model.infer(messages=messages, **settings)
                 base_metadata = dict(generated or {})
                 record.update(raw_response=response, metadata=copy.deepcopy(base_metadata), cache_hit=hit)
+                if base_metadata.get('provider_rejected') and base_metadata.get('non_retryable'):
+                    error = 'provider_content_rejected'
+                    record['validation_error'] = error
+                    break
                 if base_metadata.get('error') or base_metadata.get('finish_reason') != 'stop':
                     raise ValueError('Triple response did not finish with error-free stop')
                 payload = json.loads(response)

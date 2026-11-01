@@ -14,6 +14,8 @@ _RUNTIME_DEFAULTS = json.loads(Path(__file__).with_name("defaults.json").read_te
 @dataclass
 class RuntimeConfig:
     mechanism_ablation: str = _RUNTIME_DEFAULTS["mechanism_ablation"]
+    source_bound_eligibility: bool = _RUNTIME_DEFAULTS["source_bound_eligibility"]
+    pack_mechanism_ablation: str = _RUNTIME_DEFAULTS["pack_mechanism_ablation"]
     llm_name: str = _RUNTIME_DEFAULTS["llm_name"]
     llm_base_url: Optional[str] = _RUNTIME_DEFAULTS["llm_base_url"]
     embedding_base_url: Optional[str] = _RUNTIME_DEFAULTS["embedding_base_url"]
@@ -62,6 +64,11 @@ class RuntimeConfig:
             "full", "wo_source_bound_eligibility", "wo_dependency_closure", "wo_joint_selection"
         }:
             raise ValueError("Unknown mechanism_ablation")
+        if not isinstance(self.source_bound_eligibility, bool):
+            raise ValueError("source_bound_eligibility must be a bool")
+        if self.pack_mechanism_ablation not in {'none','flat_dependency_support',
+                'wo_support_retention','wo_residual_coverage','singleton_search'}:
+            raise ValueError('Unknown pack_mechanism_ablation')
         if not isinstance(self.openie_strict, bool):
             raise ValueError('openie_strict must be a bool')
         if self.openie_prompt_version not in ('origin', 'optimized'):

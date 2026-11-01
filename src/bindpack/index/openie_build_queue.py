@@ -21,6 +21,10 @@ MAX_PENDING_ROUNDS = 3
 MAX_WORKERS = 8
 
 
+def _terminal_failure(result):
+    return bool(result is not None and (result.metadata or {}).get('non_retryable'))
+
+
 def _stage_failed(metadata):
     return (metadata.get('error') or metadata.get('openie_skipped')
             or metadata.get('quality_status') in ('failed', 'partial', 'pending')
@@ -217,7 +221,8 @@ def run_openie_queue(extractor, chunks, initial_rows=None, checkpoint=None):
                                        ner_results.get(key), triple_results.get(key)))
 
     for round_number in range(1, MAX_PENDING_ROUNDS + 1):
-        ner_pending = [key for key in chunks if not _ner_complete(ner_results.get(key))]
+        ner_pending = [key for key in chunks if not _ner_complete(ner_results.get(key))
+                       and not _terminal_failure(ner_results.get(key))]
         logger.info('OpenIE queue round %d NER stage: pending=%d', round_number, len(ner_pending))
 
         def extract_ner(key):
@@ -249,7 +254,8 @@ def run_openie_queue(extractor, chunks, initial_rows=None, checkpoint=None):
 
         triple_pending = [key for key in chunks
                           if _ner_complete(ner_results.get(key))
-                          and not _triple_complete(extractor, triple_results.get(key))]
+                          and not _triple_complete(extractor, triple_results.get(key))
+                          and not _terminal_failure(triple_results.get(key))]
         operations = {}
 
         def extract_triples(key):
@@ -300,6 +306,10 @@ def run_openie_queue(extractor, chunks, initial_rows=None, checkpoint=None):
                    or not _triple_complete(extractor, triple_results.get(key))]
         logger.info('OpenIE queue round %d finished: remaining pending=%d', round_number, len(pending))
         if not pending:
+            break
+        if all(_terminal_failure(ner_results.get(key)) or
+               _terminal_failure(triple_results.get(key)) for key in pending):
+            logger.warning('Remaining OpenIE rows have terminal provider rejections; no retry or source splitting')
             break
 
     # All requested keys are represented even when NER never succeeds.

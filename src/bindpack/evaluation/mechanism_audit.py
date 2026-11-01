@@ -1,17 +1,18 @@
 """Fail a mechanism run if a disabled component leaks into a saved trace."""
 
 
-def audit_mechanism_rows(rows, arm):
+def audit_mechanism_rows(rows, arm, source_bound_eligibility=True):
     from ..stages.mechanisms import mechanisms
     from types import SimpleNamespace
     from dataclasses import asdict
-    expected=asdict(mechanisms(SimpleNamespace(mechanism_ablation=arm)))
+    expected=asdict(mechanisms(SimpleNamespace(mechanism_ablation=arm,
+        source_bound_eligibility=source_bound_eligibility)))
     for row in rows:
         trace=row['retrieval_trace']['evidence']
-        if arm=='full': continue
+        if arm=='full' and expected['source_bound_eligibility']: continue
         assert trace.get('mechanism_ablation')==arm
         assert trace.get('mechanisms')==expected
-        if arm=='wo_source_bound_eligibility':
+        if not expected['source_bound_eligibility']:
             for output in trace.get('verification_outputs',[]):
                 assert output.get('source_bound_eligibility') is False
                 assert output.get('mode')=='unverified_answer_extraction'

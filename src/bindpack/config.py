@@ -26,12 +26,16 @@ class BindPackConfig(RuntimeConfig):
             raise ValueError('Run stage and mechanism ablations separately')
         if self.mechanism_ablation!='full' and self.pack.review_mode!='off':
             raise ValueError('Mechanism experiments require support_semantic_veto off')
+        if self.pack_mechanism_ablation!='none' and (self.mechanism_ablation!='full' or self.stage_ablation!='full'):
+            raise ValueError('Run Pack scoring/action controls separately from end-to-end mechanism and stage ablations')
+        if self.pack_mechanism_ablation!='none' and (self.pack.review_mode!='off' or self.pack.selector_mode!='combined'):
+            raise ValueError('Pack scoring controls require combined selector and review off')
         for name, schema in (("candidates", CandidateConfig), ("route", RouteConfig),
                              ("plan", PlanConfig), ("pack", PackConfig)):
             if not isinstance(getattr(self, name), schema):
                 raise TypeError(f"{name} must be {schema.__name__}; use from_file for dict overrides")
-        if not 1 <= self.llm_prefetch_workers <= 8:
-            raise ValueError("llm_prefetch_workers must be within 1..8")
+        if not 1 <= self.llm_prefetch_workers <= 32:
+            raise ValueError("llm_prefetch_workers must be within 1..32")
         validate_groups(self)
 
     @classmethod

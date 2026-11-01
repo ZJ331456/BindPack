@@ -52,7 +52,7 @@ def index_assets(index):
     return result
 
 
-def copy_file(source, target):
+def copy_file(source, target, *, reserve_bytes=0):
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name('.' + target.name + '.copy.tmp')
     try:
@@ -61,6 +61,8 @@ def copy_file(source, target):
                 fcntl.ioctl(dst.fileno(), 0x40049409, src.fileno())
             shutil.copystat(source, tmp)
         except OSError:
+            if shutil.disk_usage(target.parent).free < source.stat().st_size + reserve_bytes:
+                raise OSError('Insufficient free space for a physical copy and the result/checkpoint reserve')
             shutil.copy2(source, tmp)
         tmp.replace(target)
     finally:

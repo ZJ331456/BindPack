@@ -28,7 +28,7 @@ ANSWERS = [
 
 class FakeRAG:
     def __init__(self, mode="full", responses=()):
-        self.config = BindPackConfig(stage_ablation=mode)
+        self.config = BindPackConfig(stage_ablation=mode,source_bound_eligibility=True)
         self.config.pack.budget = 2
         self.responses = iter(copy.deepcopy(responses))
         self.searches, self.messages = [], []

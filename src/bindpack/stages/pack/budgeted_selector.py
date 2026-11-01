@@ -1,7 +1,7 @@
 """Experimental bounded set selection; no retrieval or model inference.
 
-Closure is credited only to the existing strict citation checks. Lexical
-residual coverage is a separate, fallible signal and never creates a proof.
+Support uses strict citations when eligibility is enabled, and model-declared
+sources otherwise. Lexical residual coverage remains a separate fallible signal.
 The current no-review result is the common incumbent and ranking domain.
 """
 from __future__ import annotations
@@ -53,10 +53,18 @@ def closed_nodes(selected, choices, ancestors, order, visible=None, source_bound
     return covered
 
 
+def local_supported_nodes(selected,choices,order,visible=None,source_bound_eligibility=True):
+    """Flat OR-source support, without requiring ancestors in the selected set."""
+    return {nid for nid in order if any(p['doc_id'] in selected and
+        (not source_bound_eligibility or visible is None or p['evidence'] in visible.get(p['doc_id'],''))
+        for p in choices.get(nid,[]))}
+
+
 class BudgetedSelector:
     def __init__(self, runtime, scorer):
         self.runtime, self.scorer, self.cfg = runtime, scorer, runtime.cfg.pack
         self.mechanisms = mechanisms(runtime.cfg)
+        self.ablation = getattr(runtime.cfg,'pack_mechanism_ablation','none')
 
     def _visible(self, question, ordered):
         callback = getattr(self.runtime, '_joint_visible', None)
@@ -177,7 +185,7 @@ class BudgetedSelector:
         if features.get('residual') and not choices:
             rho = 1.0
         loss_weight = self.cfg.joint_loss_weight if features.get('risk') else 0
-        def evaluate(selected, visible=None):
+        def evaluate(selected, visible=None, control=False):
             indexes = [local[d] for d in selected]
             closed = (closed_nodes(selected, choices, ancestors, order, visible,
                                    source_bound_eligibility=self.mechanisms.source_bound_eligibility)
@@ -200,15 +208,26 @@ class BudgetedSelector:
                     (not self.mechanisms.source_bound_eligibility or visible is None or
                      p['evidence'] in visible.get(p['doc_id'], '')) for p in retention[n])}
             loss = len(lost) / max(1, len(supported0))
-            value = float(rel[indexes].sum() / k + self.cfg.coverage_weight * ((1-rho)*closure + rho*coverage)
-                          - self.cfg.redundancy_weight*red - loss_weight*loss)
+            mode='none' if control else self.ablation
+            reward_closure=closure
+            if mode=='flat_dependency_support':
+                supported=local_supported_nodes(selected,choices,order,visible,self.mechanisms.source_bound_eligibility)
+                reward_closure=(len(supported)/max(1,len(order))+len(supported&leaves)/max(1,len(leaves)))/2
+            reward_coverage=0. if mode=='wo_residual_coverage' else coverage
+            effective_loss_weight=0. if mode=='wo_support_retention' else loss_weight
+            value = float(rel[indexes].sum() / k + self.cfg.coverage_weight * ((1-rho)*reward_closure + rho*reward_coverage)
+                          - self.cfg.redundancy_weight*red - effective_loss_weight*loss)
             return value, {'closed_nodes': sorted(closed), 'predicted_closure': closure,
                            'soft_coverage': coverage, 'lexical_coverage':lexical,
                            'route_goal_coverage':route_coverage,'redundancy': red, 'lost_support': sorted(lost)}
         packages = _package_sets(choices, ancestors, order) if self.mechanisms.dependency_closure else []
         packages = [p & set(domain) for p in packages if p <= set(domain) and len(p | fixed) <= k]
-        packages.sort(key=lambda p: (-evaluate(fixed | p)[0], len(p), tuple(sorted(rank[d] for d in p))))
-        units = [frozenset([d]) for d in domain if d not in fixed] + packages[:self.cfg.joint_package_cap]
+        # Score controls share the Full-generated, capped package bank. Only the
+        # explicit action control removes packages; rho never reallocates weights.
+        packages.sort(key=lambda p: (-evaluate(fixed | p,control=True)[0], len(p), tuple(sorted(rank[d] for d in p))))
+        bank=packages[:self.cfg.joint_package_cap]
+        package_actions=[] if self.ablation=='singleton_search' else bank
+        units = [frozenset([d]) for d in domain if d not in fixed] + package_actions
         buckets = {n: {} for n in range(fixed_count, k+1)}
         buckets[fixed_count][fixed] = evaluate(fixed)[0]
         buckets[k][frozenset(s0)] = evaluate(s0)[0]
@@ -248,6 +267,11 @@ class BudgetedSelector:
         out['selected_prefix'] = [dict(previous.get(d, {'doc_id': d}),
                                       selection_source='budgeted_selector') for d in chosen[3]]
         out['budgeted_selection'] = dict(enabled=True, mode=self.cfg.selector_mode, features=features,
+            pack_mechanism_ablation=self.ablation,
+            full_package_bank=[sorted(p) for p in bank],package_action_count=len(package_actions),
+            reward_loss_weight=0. if self.ablation=='wo_support_retention' else loss_weight,
+            residual_reward_enabled=self.ablation!='wo_residual_coverage',
+            closure_reward_mode='flat' if self.ablation=='flat_dependency_support' else 'ancestor_closed',
             gold_labels_used=False, model_requests=0, reference_doc_ids=list(s0), selected_doc_ids=list(chosen[3]),
             candidate_domain=domain, eligible_proofs=choices, retention_sources=retention,
             source_records_considered=len(ev.get('source_records', [])),

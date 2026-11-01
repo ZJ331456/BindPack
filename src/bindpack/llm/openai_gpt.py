@@ -11,6 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Tuple
+from urllib.parse import urlparse
 
 import httpx
 import openai
@@ -57,6 +58,11 @@ LLM_MAX_IN_FLIGHT = _safe_env_int("BINDPACK_LLM_MAX_IN_FLIGHT", 8)
 _LLM_HTTP_SEMAPHORE = threading.BoundedSemaphore(LLM_MAX_IN_FLIGHT)
 
 
+def _is_dashscope_endpoint(base_url):
+    host = (urlparse(str(base_url or '')).hostname or '').lower()
+    return host == 'dashscope.aliyuncs.com' or host.endswith('.maas.aliyuncs.com') or host.endswith('.dashscope.aliyuncs.com')
+
+
 def _effective_generation_params(self, kwargs):
     """Build the same generation parameters for both the request and cache key."""
     params = deepcopy(self.llm_config.generate_params)
@@ -67,9 +73,18 @@ def _effective_generation_params(self, kwargs):
     if "qwen3" in model_name or "qwen3" in configured_name:
         # A caller override must not accidentally switch Qwen3 back to thinking.
         extra_body = dict(params.get("extra_body") or {})
-        chat_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
-        chat_kwargs["enable_thinking"] = False
-        extra_body["chat_template_kwargs"] = chat_kwargs
+        if _is_dashscope_endpoint(getattr(self, 'llm_base_url', None)):
+            # Model Studio takes enable_thinking at the JSON body top level;
+            # vLLM's chat_template_kwargs is a different server protocol.
+            chat_kwargs = dict(extra_body.pop('chat_template_kwargs', None) or {})
+            chat_kwargs.pop('enable_thinking', None)
+            if chat_kwargs:
+                raise ValueError('Unsupported chat-template overrides for DashScope')
+            extra_body['enable_thinking'] = False
+        else:
+            chat_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+            chat_kwargs["enable_thinking"] = False
+            extra_body["chat_template_kwargs"] = chat_kwargs
         params["extra_body"] = extra_body
     return params
 
@@ -81,6 +96,28 @@ def _is_retryable_llm_error(exc: Exception) -> bool:
         status = exc.status_code
         return status in (408, 409, 429) or status >= 500
     return False
+
+
+def _content_rejection_metadata(llm, exc):
+    """Opt-in terminal abstention for a provider's explicit content rejection.
+
+    Authentication, schema, rate-limit and transport errors keep their existing
+    behavior. No text is rewritten and unknown token usage stays unknown.
+    """
+    if (os.environ.get('BINDPACK_PROVIDER_REJECTION_POLICY') != 'abstain'
+            or not _is_dashscope_endpoint(getattr(llm, 'llm_base_url', None))
+            or not isinstance(exc, openai.APIStatusError) or exc.status_code != 400):
+        return None
+    body = getattr(exc, 'body', None)
+    error = body.get('error', body) if isinstance(body, dict) else {}
+    code = error.get('code') if isinstance(error, dict) else None
+    if code != 'data_inspection_failed':
+        return None
+    return dict(finish_reason='content_filter', error='provider_content_rejected',
+                provider_error_code=code, non_retryable=True, provider_rejected=True,
+                prompt_tokens=None, completion_tokens=None, model=llm.llm_name,
+                provider='dashscope', thinking_enabled=False,
+                usage_unavailable_reason='provider rejection did not return token usage')
 
 
 def _retry_after_seconds(exc: Exception):
@@ -327,7 +364,15 @@ class CacheOpenAI(BaseLLM):
 
         with _LLM_HTTP_SEMAPHORE:
             _increment_stat(self, "llm_http_attempt_count")
-            response = self.openai_client.chat.completions.create(**params)
+            try:
+                response = self.openai_client.chat.completions.create(**params)
+            except Exception as exc:
+                rejected = _content_rejection_metadata(self, exc)
+                if rejected is None:
+                    raise
+                _increment_stat(self, 'llm_failure_count')
+                logger.warning('Provider rejected content; recorded terminal abstention without retry')
+                return '', rejected
 
         message_obj = response.choices[0].message
         response_message = ""
@@ -376,5 +421,10 @@ class CacheOpenAI(BaseLLM):
             "completion_tokens": response.usage.completion_tokens,
             "finish_reason": response.choices[0].finish_reason,
         }
+        if _is_dashscope_endpoint(self.llm_base_url):
+            metadata.update(model=getattr(response, 'model', self.llm_name),
+                            response_id=getattr(response, 'id', None),
+                            usage_details=response.usage.model_dump(mode='json'),
+                            provider='dashscope', thinking_enabled=False)
 
         return response_message, metadata

@@ -156,6 +156,30 @@ def _fixed_array_schema(value):
     return result
 
 
+def structured_request_parameters(llm_model, schema, extra_body=None):
+    """Keep schema validation while selecting the provider's wire protocol.
+
+    DashScope accepts OpenAI JSON Schema, rather than vLLM's EBNF fields.
+    Local decoding retains the existing exact-array grammar unchanged.
+    """
+    from ...llm.openai_gpt import _is_dashscope_endpoint
+    if not _is_dashscope_endpoint(getattr(llm_model, 'llm_base_url', None)):
+        return {'extra_body': guided_json_parameters(schema, extra_body)}
+    if not isinstance(schema, dict):
+        raise StructuredOutputSchemaError('The strict OpenIE JSON schema must be an object')
+    json.dumps(schema, allow_nan=False)
+    parameters = copy.deepcopy(extra_body or {})
+    for key in ('guided_json', 'guided_regex', 'guided_choice', 'guided_grammar',
+                'guided_json_object', 'guided_whitespace_pattern',
+                'guided_decoding_backend', 'guided_structural_tag', 'structured_outputs',
+                'chat_template_kwargs'):
+        parameters.pop(key, None)
+    parameters['enable_thinking'] = False
+    return {'extra_body': parameters, 'response_format': {
+        'type': 'json_schema', 'json_schema': {
+            'name': 'bindpack_extraction', 'strict': True, 'schema': copy.deepcopy(schema)}}}
+
+
 def guided_json_parameters(schema, extra_body=None):
     """Return exactly one grammar constraint and disable model thinking.
 

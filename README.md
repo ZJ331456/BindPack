@@ -1,69 +1,59 @@
 # BindPack
 
-BindPack: Source-Bound and Dependency-Closed Evidence Selection for Multi-Hop RAG
+源码按 Route → Plan/Bind → Pack 组织，支持 HotpotQA、2WikiMultiHopQA、MuSiQue 和 HoVer。
 
-源码按 Route → Plan/Bind → Pack 组织。默认模型为 Qwen3-8B 与 Qwen3-Embedding-8B，BindPack 的阶段对照只有 `full`、`wo_route`、`wo_plan`、`wo_pack` 四组。复用脚本默认另外运行外部 HippoRAG 2 复现，并为五组输出检索与 QA 指标。
+## 当前实验入口
 
 ```bash
-# 查看执行计划，不加载模型
-bash scripts/run_bindpack_ablations_qwen3.sh --dry-run
-
-# 配置的 Qwen3-8B 服务启动后验证四组
-bash scripts/run_bindpack_ablations_qwen3.sh --smoke
-
-# 正式实验
-bash scripts/run_bindpack_ablations_qwen3.sh
-
-# HoVer：验证 claim，输出 SUPPORTED / NOT_SUPPORTED 分类指标
-bash scripts/run_bindpack_ablations_qwen3.sh --datasets hover --eval-mode rag_qa \
-  --out-root /root/BindPack/outputs/hover_annotation_hops --dry-run
+bash scripts/run_final_ablation_queue.sh
 ```
 
-算法默认参数集中在 [configuration/defaults.json](src/bindpack/configuration/defaults.json)，[config.py](src/bindpack/config.py) 组合按阶段分组的配置并校验；模型资源、数据与输出编排在 [ablations_qwen3.json](configs/ablations_qwen3.json)。索引必须与 Qwen embedding、语料和建库协议匹配；新建入口自行建库，复用入口只读取通过核验的现有索引。
+队列按以下顺序串行执行20组，每组1000题：
 
-当前默认采用已完成四数据集 Full 的 `joint_free` 联合 Pack：`selector_mode=combined`、`joint_fixed_prefix=0`、`joint_state_cap=4096`、`joint_search_seconds=5.0`，相关性权重为0.60。通过来源绑定的闭合支持、残余软覆盖、来源替代及删除风险进行预算内选包，最终Reader仍读取5篇原文。`pack.review_mode=off`，Support / semantic veto保持关闭。
+1. HotpotQA 的 w/o Dependency、w/o Joint Selection；然后依次2Wiki、MuSiQue、HoVer，共8组。
+2. HotpotQA 的 w/o Route、w/o Plan、w/o Pack；然后按相同数据集顺序，共12组。
 
-新方案Full和w/o Pack的冻结串行队列位于 `outputs/4_datasets_result/pack_nine_cases_20261027/`，复用 `outputs/4_datasets_result/shared_indexes/`。默认值调整只影响后续工作区入口，已经冻结的队列与历史结果不变；旧无核验Pack结果保留在 `full_no_review_20261026/` 作为对照。
+本轮明确不运行 w/o Soft Coverage，不运行最终QA。所有组重新执行原生上游，只复用公共图、向量和OpenIE索引；各组应用缓存独立。指标、请求/tokens、资源、证据预算和可续跑断点全部保存。
 
-数据默认读取本仓库的 `/root/BindPack/datasets`，支持 HotpotQA、2WikiMultiHopQA、MuSiQue 和 HoVer；默认批次仍为前三个，HoVer 用 `--datasets hover` 选择。Hop 读取标注的规则和分布见 [datasets/README.md](datasets/README.md)。2Wiki 使用支持事实数量的 2/4 桶，不代表串行依赖深度；四个多跳数据集均在协议中明确记录参考标注的使用。
+脚本先在相同小样本上校准8/16/32题窗口和客户端LLM并行数，选实测吞吐最快者，再做五种消融的真实模型预检，通过后进入20组正式队列。组间串行，组内并行；当前vLLM服务不重启。窗口摊销时间是吞吐统计，不能当作单题独立延迟。
 
-公开 API：
+```bash
+tail -f /root/BindPack/outputs/ablations_full_20261029/run.log
+```
+
+## 当前Full和保留资产
+
+- 最新四套Full：`outputs/4_datasets_result/final_full_no_source_20261028/cases/<dataset>/full/`。每套1000题，原报告、逐题结果、成本及资源记录保留且未改写；QA尚未运行。
+- 公共索引：`outputs/4_datasets_result/shared_indexes/<dataset>/`，使用`manifest.json`核验完整语料和模型身份。
+- Full原输入和源码：`final_full_no_source_20261028/input_provenance/`、`source_snapshot/`及`provenance/`。
+- 旧路径迁移：`final_full_no_source_20261028/relocation_20261029.json`；历史协议的绝对路径仍是历史来源，迁移表给出保留位置。
+- 先前的紧凑机制分析：`outputs/4_datasets_result/ablation_results_20261028/`，这是指向Full分析目录的兼容链接；旧大文件已按用户要求清理。
+- 新20组结果：`outputs/ablations_full_20261029/RESULTS.md`、`summary.json`、`status.json`，各组位于`mechanisms/`和`stages/`。
+
+## 默认方法与模型
+
+默认Full为`source_bound_eligibility=false`、`mechanism_ablation=full`、`pack_mechanism_ablation=none`。Plan使用普通中间答案抽取，保留依赖执行和答案传递；Pack采用`selector_mode=combined`、`joint_fixed_prefix=0`、`joint_state_cap=4096`，相关性权重0.60，预算5篇原文。模型声明来源不等于严格核验的证明。`pack.review_mode=off`，Support / semantic veto关闭。
+
+LLM固定`/root/models/Qwen3-8B`，Embedding固定`/root/models/Qwen3-Embedding-8B`、batch4。默认客户端预取仍为8，新队列可显式校准到16或32；这不是改变vLLM物理序列上限。vLLM当前服务的显存比例为0.55。
+
+参数集中在[defaults.json](src/bindpack/configuration/defaults.json)，配置入口为[config.py](src/bindpack/config.py)。模型和数据编排见[ablations_qwen3.json](configs/ablations_qwen3.json)。
 
 ```python
 from bindpack import BindPack, BindPackConfig
-
 cfg = BindPackConfig.from_file(stage_ablation="full", save_dir="outputs/my_run/index")
 rag = BindPack(config=cfg)
 ```
 
-配置通过 `cfg.candidates`、`cfg.route`、`cfg.plan`、`cfg.pack` 访问，运行对象使用 `rag.config`。旧导入包装和历史组件 flags 已删除。
+配置通过`cfg.candidates`、`cfg.route`、`cfg.plan`、`cfg.pack`访问。阶段和完整机制消融分开配置；完整去依赖仍保留独立子问题规划，w/o Plan则跳过整个Plan阶段，两者不是同一组。
 
-新建索引入口的 `--smoke` 默认以选中问题的 context 构建小语料，只验证链路；正式实验使用相同完整 corpus。该入口默认 `retrieve` 输出检索指标，`--eval-mode rag_qa` 执行 reader 并输出 QA 指标。复用 Shell 入口默认已设置 `rag_qa` 和 `--include-hipporag`；外部复现依赖 `/root/baseline/HippoRAG/main.py`，该文件不随本仓库交付。
+## 数据与指标
 
-复用入口使用 `/root/BindPack/outputs/3multi_hop_datasets_results_10_5/shared_indexes/`，BindPack 新结果为同一根目录的 `cases/<dataset>/<full|wo_route|wo_plan|wo_pack>/`，HippoRAG 2 为 `cases/<dataset>/hippporag2_reproduce/`。旧实验目录与根目录的历史汇总保留；本批次的协议和汇总单独保存在 `metadata/stage_ablations_qwen3_reuse/`。复用入口的 `--smoke` 使用完整旧索引评测少量问题，默认输出到独立 smoke 目录。
+数据位于`/root/BindPack/datasets`。Hop策略及分布见[datasets/README.md](datasets/README.md)。现有对照沿用benchmark native hop并明确记录oracle提示；不是自主推断hop。
 
-当前在跑的历史批次已固定到 `outputs/runtime_snapshots/` 下的原代码和原输入。新 hop 规则需要新的输出目录；不能用新配置覆盖或续跑旧批次。MuSiQue 新旧文件的字节摘要不同，但完整 JSON 内容、顺序和 passage 文本一致；核对原文件摘要、完整 JSON 等价性及索引资产后，可在新批次中复用三个旧索引，协议会保存等价性回执。实际内容变化仍拒绝复用。HoVer 没有旧索引，需要单独建库。例如：
+检索报告含Recall、FCR及可计算的NodeCov、DCC、ClosureGap，无法计算者为N/A。MuSiQue有独立gold依赖标注，其他数据集不以预测DAG冒充gold。Reader@5预算可以提前渲染，但未生成答案时QA指标必须保持N/A。HoVer若执行QA，应报告标签Accuracy和Macro-F1。
 
-```bash
-bash scripts/run_bindpack_four_cases_reuse.sh --datasets hotpotqa 2wikimultihopqa musique \
-  --out-root /root/BindPack/outputs/annotation_hops_reuse --dry-run
-```
-
-查看复用实验总日志：
-
-```bash
-tail -f /root/BindPack/outputs/3multi_hop_datasets_results_10_5/logs/run_bindpack_four_cases_reuse.log
-```
-
-每组另存 `report.json` 汇总指标和 `metrics_details.json` 逐题诊断，包含 FCR 与基于独立 gold DAG 的 DCC。已有最终排名可离线补算，无需重跑：
-
-```bash
-python scripts/report_metrics.py --cases-root outputs/3multi_hop_datasets_results_10_5/cases
-```
-
-MuSiQue 可计算 DCC；HotpotQA/2Wiki/HoVer 缺少可信 gold DAG 时为 `null` 并注明原因。HoVer 额外报告分类 Accuracy、Macro-F1 及逐标签统计，其 EM/F1 使用整标签匹配。定义、来源与自动补算见 [指标说明](docs/指标说明.md)。
-
-- [实验图表、消融设计与运行协议](docs/实验图表.md)
-- [指标定义与离线报告](docs/指标说明.md)
-- [Baseline 分类、论文出处与公平比较](docs/Baseline说明.md)
-- [源码结构与配置](src/bindpack/README.md)
+- [实验图表与运行协议](docs/实验图表.md)
+- [指标定义](docs/指标说明.md)
+- [Baseline说明](docs/Baseline说明.md)
+- [机制消融定义](scripts/MECHANISM_ABLATIONS.md)
+- [源码结构](src/bindpack/README.md)

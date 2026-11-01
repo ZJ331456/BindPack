@@ -333,7 +333,7 @@ class BaseRAG(GraphIndexMixin):
 
 
 
-    def qa(self, queries: List[QuerySolution]) -> Tuple[List[QuerySolution], List[str], List[Dict]]:
+    def qa(self, queries: List[QuerySolution], *, max_output_tokens=None) -> Tuple[List[QuerySolution], List[str], List[Dict]]:
         """
         Executes question-answering (QA) inference using a provided set of query solutions and a language model.
 
@@ -377,7 +377,10 @@ class BaseRAG(GraphIndexMixin):
             all_qa_messages.append(
                 self.prompt_template_manager.render(name=f'rag_qa_{prompt_dataset_name}', prompt_user=prompt_user))
 
-        all_qa_results = [self.llm_model.infer(qa_messages) for qa_messages in tqdm(all_qa_messages, desc="QA Reading")]
+        limits={} if max_output_tokens is None else {'max_completion_tokens':max_output_tokens}
+        if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens<1):
+            raise ValueError('Reader output limit must be a positive integer')
+        all_qa_results = [self.llm_model.infer(qa_messages,**limits) for qa_messages in tqdm(all_qa_messages, desc="QA Reading")]
 
         all_response_message, all_metadata, all_cache_hit = zip(*all_qa_results)
         all_response_message, all_metadata = list(all_response_message), list(all_metadata)
@@ -486,6 +489,12 @@ class BaseRAG(GraphIndexMixin):
         self.passage_embeddings = np.array(self.chunk_embedding_store.get_embeddings(self.passage_node_keys))
 
         self.fact_embeddings = np.array(self.fact_embedding_store.get_embeddings(self.fact_node_keys))
+        self._cuda_retrieval_index=None
+        if os.environ.get('BINDPACK_RETRIEVAL_DEVICE','cpu').lower()=='cuda':
+            from ..retrieval.cuda_index import CudaRetrievalIndex
+            self._cuda_retrieval_index=CudaRetrievalIndex(self.graph,{
+                'fact':self.fact_embeddings,'passage':self.passage_embeddings,'entity':self.entity_embeddings})
+            logger.info('CUDA retrieval vectors and weighted graph resident: %s',self._cuda_retrieval_index.stats)
 
         all_openie_info, chunk_keys_to_process = self.load_existing_openie([])
 
@@ -599,12 +608,16 @@ class BaseRAG(GraphIndexMixin):
             return np.array([])
             
         try:
-            query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T) # shape: (#facts, )
+            cuda=getattr(self,'_cuda_retrieval_index',None)
+            query_fact_scores = (cuda.scores('fact',query_embedding) if cuda is not None else
+                                 np.dot(self.fact_embeddings, query_embedding.T))
             query_fact_scores = np.squeeze(query_fact_scores) if query_fact_scores.ndim == 2 else query_fact_scores
             query_fact_scores = min_max_normalize(query_fact_scores)
             return query_fact_scores
         except Exception as e:
             logger.error(f"Error computing fact scores: {str(e)}")
+            if getattr(self,'_cuda_retrieval_index',None) is not None:
+                raise
             return np.array([])
 
     def dense_passage_retrieval(self, query: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -636,7 +649,9 @@ class BaseRAG(GraphIndexMixin):
             query_embedding = self.embedding_model.batch_encode(query,
                                                                 instruction=get_query_instruction('query_to_passage'),
                                                                 norm=True)
-        query_doc_scores = np.dot(self.passage_embeddings, query_embedding.T)
+        cuda=getattr(self,'_cuda_retrieval_index',None)
+        query_doc_scores = (cuda.scores('passage',query_embedding) if cuda is not None else
+                            np.dot(self.passage_embeddings, query_embedding.T))
         query_doc_scores = np.squeeze(query_doc_scores) if query_doc_scores.ndim == 2 else query_doc_scores
         query_doc_scores = min_max_normalize(query_doc_scores)
 
@@ -749,14 +764,20 @@ class BaseRAG(GraphIndexMixin):
 
         if damping is None: damping = 0.5 # for potential compatibility
         reset_prob = np.where(np.isnan(reset_prob) | (reset_prob < 0), 0, reset_prob)
-        pagerank_scores = self.graph.personalized_pagerank(
-            vertices=range(len(self.node_name_to_vertex_idx)),
-            damping=damping,
-            directed=False,
-            weights='weight',
-            reset=reset_prob,
-            implementation='prpack'
-        )
+        cuda=getattr(self,'_cuda_retrieval_index',None)
+        if cuda is not None:
+            if cuda.nodes!=self.graph.vcount() or cuda.edges!=self.graph.ecount():
+                raise RuntimeError('Graph changed after CUDA index initialization')
+            pagerank_scores=cuda.pagerank(reset_prob,damping)
+        else:
+            pagerank_scores = self.graph.personalized_pagerank(
+                vertices=range(len(self.node_name_to_vertex_idx)),
+                damping=damping,
+                directed=False,
+                weights='weight',
+                reset=reset_prob,
+                implementation='prpack'
+            )
 
         doc_scores = np.array([pagerank_scores[idx] for idx in self.passage_node_idxs])
         sorted_doc_ids = np.argsort(doc_scores)[::-1]

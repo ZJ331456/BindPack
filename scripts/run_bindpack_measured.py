@@ -36,15 +36,26 @@ def parser():
     p.add_argument("--case", choices=['full','wo_route','wo_plan','wo_pack'], default='full')
     p.add_argument("--mechanism-ablation", choices=['full','wo_source_bound_eligibility',
         'wo_dependency_closure','wo_joint_selection'], default='full')
+    p.add_argument("--source-bound-eligibility", choices=['on','off'], default=None,
+                   help='Explicit baseline setting, independently combined with dependency/joint ablations')
     p.add_argument("--eval-mode", choices=['rag_qa','retrieve'], default='rag_qa')
     p.add_argument("--candidate-output-top-k",type=int,default=200,
                    help='Text export prefix; complete passage hashes and gold ranks are retained')
     p.add_argument("--reuse-index", help="completed Full case's index; independent graph/vector copy, empty LLM cache")
     p.add_argument("--reuse-archive-index", help="verified archive/shared_indexes/<dataset>; no rebuilding or historical query cache")
     p.add_argument("--query-limit", type=int, help="development check on a full archived corpus; preserve native hop/label diversity")
+    p.add_argument("--query-indices", help="Frozen JSON list of original dataset indices; reuse the full archived corpus")
     p.add_argument("--prepare-only", action="store_true", help="freeze and validate inputs without loading models or sending LLM requests")
-    p.add_argument("--query-window", type=int, choices=[1,8], default=8,
+    p.add_argument("--query-window", type=int, choices=[1,8,16,32], default=8,
                    help="Native cross-query prefetch window; datasets remain serial")
+    p.add_argument("--reader-workers", type=int, choices=[1,8,16,32], default=1,
+                   help="Opt-in concurrent native Reader calls within each durable retrieval window")
+    p.add_argument("--model-factor-profile", choices=['qwen3_bge_m3','dashscope_qwen3_emb8b',
+                                                    'dashscope_qwen3_emb8b_fresh','dashscope_bge_m3'],
+                   help="Explicit Table 6 model replacement; other runs retain the fixed-model guard")
+    p.add_argument('--index-extraction-llm', help='Explicit original extraction model when replacing only the online LLM')
+    p.add_argument('--qa-max-tokens',type=int,help='Reader-only output token cap; reaching it retains the response without retry')
+    p.add_argument('--response-cache-seed',help='Explicit same-provider/model response cache; exact native cache keys only')
     p.add_argument("--frozen-worker", action="store_true", help=argparse.SUPPRESS)
     return p
 
@@ -77,8 +88,18 @@ def freeze_worker(args):
     if args.reuse_index: argv += ['--reuse-index',str(Path(args.reuse_index).resolve())]
     if args.reuse_archive_index: argv += ['--reuse-archive-index',str(Path(args.reuse_archive_index).resolve())]
     if args.query_limit is not None: argv += ['--query-limit',str(args.query_limit)]
+    if args.query_indices is not None: argv += ['--query-indices',str(Path(args.query_indices).resolve())]
     argv += ['--query-window',str(args.query_window)]
+    argv += ['--reader-workers',str(args.reader_workers)]
+    if args.model_factor_profile:
+        argv += ['--model-factor-profile',args.model_factor_profile]
+    if args.index_extraction_llm:
+        argv += ['--index-extraction-llm',args.index_extraction_llm]
+    if args.qa_max_tokens is not None:argv += ['--qa-max-tokens',str(args.qa_max_tokens)]
+    if args.response_cache_seed:argv += ['--response-cache-seed',str(Path(args.response_cache_seed).resolve())]
     argv += ['--mechanism-ablation',args.mechanism_ablation,'--eval-mode',args.eval_mode]
+    if args.source_bound_eligibility is not None:
+        argv += ['--source-bound-eligibility',args.source_bound_eligibility]
     argv += ['--candidate-output-top-k',str(args.candidate_output_top_k)]
     os.execv(sys.executable, argv)
 
@@ -112,9 +133,30 @@ def run(args):
             shutil.copy2(Path(args.datasets_dir) / (stem + ".json"), output / (stem + ".json"))
     settings = json.loads(config_file.read_text())
     runtime = settings["runtime"]
+    expected_embedding = ('/root/models/bge-m3' if args.model_factor_profile in ('qwen3_bge_m3','dashscope_bge_m3')
+                          else '/root/models/Qwen3-Embedding-8B')
     if (runtime["llm_model_path"] != "/root/models/Qwen3-8B" or
-            runtime["embedding_model_name"] != "/root/models/Qwen3-Embedding-8B"):
+            runtime["embedding_model_name"] != expected_embedding):
         raise ValueError("Measured comparison requires the fixed Qwen3 models")
+    if args.index_extraction_llm and (args.model_factor_profile!='dashscope_qwen3_emb8b' or not args.reuse_archive_index):
+        raise ValueError('Changing online versus extraction LLM requires explicit cloud profile and verified archived index')
+    if args.model_factor_profile in ('dashscope_qwen3_emb8b','dashscope_qwen3_emb8b_fresh','dashscope_bge_m3'):
+        from bindpack.llm.openai_gpt import _is_dashscope_endpoint
+        if not _is_dashscope_endpoint(runtime['llm_base_url']) or runtime['llm_name']!='qwen3.8-flash':
+            raise ValueError('Cloud profile expects the configured DashScope qwen3.8-flash endpoint/model')
+        if args.model_factor_profile=='dashscope_qwen3_emb8b' and not args.index_extraction_llm:
+            raise ValueError('Cloud profile must explicitly retain the original extraction-model identity')
+        if args.model_factor_profile=='dashscope_qwen3_emb8b_fresh':
+            if args.reuse_index or args.reuse_archive_index or args.index_extraction_llm:
+                raise ValueError('Fresh cloud extraction profile forbids all index reuse')
+            if runtime['openie_validation_mode']!='structural':
+                raise ValueError('Cloud extraction currently supports the structural OpenIE contract')
+    if args.response_cache_seed and not (args.model_factor_profile or '').startswith('dashscope_'):
+        raise ValueError('Response-cache reuse requires an explicit cloud model profile')
+    if args.reader_workers > 1 and (args.query_window == 1 or args.eval_mode != 'rag_qa'):
+        raise ValueError('Concurrent Reader requires window retrieval and actual QA')
+    if args.qa_max_tokens is not None and not 1<=args.qa_max_tokens<=2048:
+        raise ValueError('Reader cap must fit the reserved output budget1..2048')
     data_path, corpus_source = output / (args.dataset + ".json"), output / (args.dataset + "_corpus.json")
     data, corpus = json.loads(data_path.read_text()), json.loads(corpus_source.read_text())
     hops_all = get_benchmark_hops(data, args.dataset)
@@ -123,6 +165,13 @@ def run(args):
         raise ValueError('Select one index reuse source')
     if args.query_limit is not None and (args.query_limit < 1 or not args.reuse_archive_index):
         raise ValueError('query-limit requires a positive limit and an archived full corpus')
+    if args.query_indices is not None:
+        if args.smoke or args.query_limit is not None or not args.reuse_archive_index:
+            raise ValueError('query-indices requires archived corpus and cannot combine with smoke/query-limit')
+        indices=json.loads(Path(args.query_indices).read_text())
+        if (not isinstance(indices,list) or not indices or
+                any(type(i) is not int or not 0<=i<len(data) for i in indices) or len(set(indices))!=len(indices)):
+            raise ValueError('query-indices must be nonempty, unique, in-range integer indices')
     if args.smoke or args.query_limit is not None:
         # Cover distinct native hop/label combinations; this is a development check.
         chosen, seen = [], set()
@@ -154,7 +203,7 @@ def run(args):
         source_data_path=str(Path(args.datasets_dir) / (args.dataset + ".json")),
         selected_indices=indices, sample_ids=[get_sample_id(s, args.dataset) for s in samples],
         corpus_docs=len(docs), corpus_docs_sha256=digest(docs), gold_completion_added=added,
-        development_fixture=args.smoke or args.query_limit is not None, oracle_hops=True,
+        development_fixture=args.smoke or args.query_limit is not None or args.query_indices is not None, oracle_hops=True,
         hop_provenance=describe_benchmark_hops(data, args.dataset))
     def freeze(path, value):
         if path.exists() and json.loads(path.read_text()) != value:
@@ -165,8 +214,15 @@ def run(args):
     model_paths = [Path(runtime[key]) for key in ("llm_model_path", "embedding_model_name")]
     model_identity = {str(p): {str(f.relative_to(p)): dict(bytes=f.stat().st_size,
         sha256=sha256(f) if f.suffix == ".json" else None)
-        for f in sorted(p.rglob('*')) if f.is_file() and f.suffix in ('.json','.safetensors')}
+        for f in sorted(p.rglob('*')) if f.is_file() and f.suffix in ('.json','.safetensors','.bin')}
         for p in model_paths}
+    if args.model_factor_profile in ('dashscope_qwen3_emb8b','dashscope_qwen3_emb8b_fresh','dashscope_bge_m3'):
+        model_identity.pop(runtime['llm_model_path'])
+        model_identity['remote_llm']=dict(model=runtime['llm_name'],base_url=runtime['llm_base_url'],
+            thinking_enabled=False,credentials='environment only; never included in protocol')
+        model_identity['reader_budget_tokenizer']=dict(path=runtime['llm_model_path'],
+            purpose='local conservative context preflight; actual API billing tokens come from server usage',
+            tokenizer_config_sha256=sha256(Path(runtime['llm_model_path'])/'tokenizer_config.json'))
     sources = {str(p.relative_to(ROOT)): sha256(p) for folder in (ROOT/'src', ROOT/'scripts')
                for p in sorted(folder.rglob('*.py'))}
     source_method = Path(settings["method_config"])
@@ -176,12 +232,14 @@ def run(args):
     overrides = {k: runtime[k] for k in ("llm_name", "llm_base_url", "embedding_model_name", "embedding_batch_size",
         "openie_max_workers", "llm_prefetch_workers", "max_new_tokens", "openie_strict",
         "openie_prompt_version", "openie_validation_mode")}
+    if args.source_bound_eligibility is not None:
+        overrides['source_bound_eligibility'] = args.source_bound_eligibility == 'on'
     config = BindPackConfig.from_file(method, **overrides, save_dir=str(case/'index'), dataset=args.dataset,
         corpus_len=len(docs), stage_ablation=stage, retrieval_top_k=200, qa_top_k=5, max_qa_steps=1,
         mechanism_ablation=args.mechanism_ablation)
-    protocol = dict(schema_version=1, mode="smoke" if args.smoke or args.query_limit is not None else "full", method="bindpack", stage_ablation=stage,
+    protocol = dict(schema_version=1, mode="smoke" if identity['development_fixture'] else "full", method="bindpack", stage_ablation=stage,
         dataset=identity, configuration=asdict(config), models=model_identity, source=sources,
-        query_concurrency=args.query_window, native_llm_concurrency=8, embedding_batch_size=4,
+        query_concurrency=args.query_window, native_llm_concurrency=config.llm_prefetch_workers, embedding_batch_size=config.embedding_batch_size,
         cache_policy="independent empty cache on fresh run; retain cache and all real attempts on resume",
         hop_condition="oracle native benchmark hops, recorded explicitly; no gold documents/answers passed to retrieval",
         reader_policy="native prompt/parser; reader@5; baseline-compatible 8192 input+output prefix budget",
@@ -189,6 +247,33 @@ def run(args):
     protocol.update(mechanism_ablation=args.mechanism_ablation,eval_mode=args.eval_mode,
         candidate_output_top_k=args.candidate_output_top_k,
         qa_executed=args.eval_mode=='rag_qa',upstream_policy='fresh native Route and Plan; no historical model responses')
+    if args.model_factor_profile:
+        protocol['model_factor_profile'] = args.model_factor_profile
+        protocol['http_max_in_flight'] = int(os.environ.get('BINDPACK_LLM_MAX_IN_FLIGHT','8'))
+        if args.model_factor_profile.startswith('dashscope_'):
+            protocol['provider_rejection_policy']=os.environ.get('BINDPACK_PROVIDER_REJECTION_POLICY','stop')
+            protocol['provider_rejection_scope']='explicit data_inspection_failed only; retain failed request, original source and every query; no retry or content rewriting'
+    if args.index_extraction_llm:
+        protocol['index_extraction_llm']=args.index_extraction_llm
+        protocol['model_replacement_scope']='online Route/Plan/Reader replacement; original extraction and embedding index retained'
+    if args.model_factor_profile=='dashscope_qwen3_emb8b_fresh':
+        protocol['index_extraction_llm']=runtime['llm_name']
+        protocol['model_replacement_scope']='fresh API NER/OpenIE, fresh graph and all vectors, API Route/Plan/Reader'
+    if args.model_factor_profile=='dashscope_bge_m3':
+        protocol['index_extraction_llm']=runtime['llm_name']
+        protocol['model_replacement_scope']='same API extraction reused; BGE passage/entity/fact vectors and synonym edges rebuilt; native API Route/Plan/Reader'
+    if args.response_cache_seed:
+        protocol['response_cache_reuse']=dict(source=str(Path(args.response_cache_seed).resolve()),
+            policy='exact native v2 keys include messages, effective generation parameters and base_url; real cache hits recorded; inherited cost excluded')
+        protocol['cache_policy']='explicit same-model/provider response cache seed; exact native keys; retain all new physical attempts'
+    if args.reader_workers > 1:
+        protocol['reader_concurrency'] = args.reader_workers
+    if args.qa_max_tokens is not None:
+        protocol['qa_max_tokens']=args.qa_max_tokens
+        protocol['qa_length_policy']='retain and parse truncated native response; no length retry or continuation'
+    if os.environ.get('BINDPACK_RETRIEVAL_DEVICE','cpu')=='cuda':
+        protocol['retrieval_compute_device']='cuda'
+        protocol['pagerank_compute_device']='cuda'
     if args.reuse_index:
         protocol['index_reuse'] = dict(source=str(Path(args.reuse_index).resolve()),
             policy='private graph/vector/OpenIE copy; no Full or cross-ablation LLM/query caches')
@@ -253,7 +338,8 @@ def run(args):
                 from utils.archived_index import prepare_archive
                 with recorder.section('offline_index'):
                     copy_start=time.perf_counter()
-                    prepare_archive(args.reuse_archive_index,case/'index',case,identity,docs,config)
+                    prepare_archive(args.reuse_archive_index,case/'index',case,identity,docs,config,
+                        extraction_llm_name=args.index_extraction_llm)
                     copy_seconds=time.perf_counter()-copy_start
             if args.reuse_index:
                 from utils.measured_cases import prepare_reused_index
@@ -265,8 +351,16 @@ def run(args):
                 from transformers import AutoTokenizer
                 tokenizer=AutoTokenizer.from_pretrained(runtime['llm_model_path'],local_files_only=True)
                 from bindpack.llm.openai_gpt import CacheOpenAI
+                if args.response_cache_seed:
+                    from utils.llm_cache_reuse import seed_response_cache
+                    receipt=seed_response_cache(args.response_cache_seed,
+                        case/'index/llm_cache'/(runtime['llm_name'].replace('/','_')+'_cache.sqlite'))
+                    write_json(case/'response_cache_seed.json',receipt)
                 recorder.install_llm_factory(CacheOpenAI,tokenizer)
                 rag=BindPack(config=config)
+                if args.qa_max_tokens is not None:
+                    from functools import partial
+                    rag.qa=partial(rag.qa,max_output_tokens=args.qa_max_tokens)
                 if args.eval_mode=='retrieve':
                     def deny_qa(*a,**kw):raise AssertionError('Final QA generation is disabled in this experiment')
                     rag.qa=deny_qa
@@ -307,21 +401,31 @@ def run(args):
                 stream=iter_windows(rag,case,len(rows),[get_query_text(s,args.dataset) for s in samples],
                     [hops_all[j] for j in indices],identity['sample_ids'],recorder,requested_stop,args.query_window)
             else:stream=serial_solutions()
+            if args.reader_workers > 1:
+                from utils.parallel_reader import iter_readers
+                stream=iter_readers(stream,rag,case,identity['sample_ids'],recorder,requested_stop,
+                    args.reader_workers,lambda solution:prepare(rag,solution,tokenizer,args.dataset))
             for i,solution,retrieval_timing in stream:
                 if requested_stop.is_set():raise KeyboardInterrupt('Stopped at a durable query boundary; all prior costs/checkpoints retained')
                 sample=samples[i];qid=identity['sample_ids'][i];query=get_query_text(sample,args.dataset)
-                with recorder.section('online_reader' if args.eval_mode=='rag_qa' else 'budget_preparation',qid):
-                    reading_start=time.perf_counter()
-                    reader_solution,budget=prepare(rag,solution,tokenizer,args.dataset)
-                    if args.eval_mode=='rag_qa':
-                        answered,raw,metas=rag.qa([reader_solution])
-                        solution.answer=answered[0].answer
-                        reading_seconds=time.perf_counter()-reading_start
-                    else:
-                        solution.answer=None
-                        raw,metas=[None],[{'finish_reason':None,'qa_executed':False}]
-                        reading_seconds=0.0
-                    budget_seconds=time.perf_counter()-reading_start if args.eval_mode=='retrieve' else 0.0
+                prepared_reader=retrieval_timing.pop('_prepared_reader',None)
+                if prepared_reader is not None:
+                    budget=prepared_reader['budget'];raw=[prepared_reader['raw_response']]
+                    metas=[prepared_reader['metadata']];reading_seconds=prepared_reader['seconds'];budget_seconds=0.0
+                    solution.answer=prepared_reader['answer']
+                else:
+                    with recorder.section('online_reader' if args.eval_mode=='rag_qa' else 'budget_preparation',qid):
+                        reading_start=time.perf_counter()
+                        reader_solution,budget=prepare(rag,solution,tokenizer,args.dataset)
+                        if args.eval_mode=='rag_qa':
+                            answered,raw,metas=rag.qa([reader_solution])
+                            solution.answer=answered[0].answer
+                            reading_seconds=time.perf_counter()-reading_start
+                        else:
+                            solution.answer=None
+                            raw,metas=[None],[{'finish_reason':None,'qa_executed':False}]
+                            reading_seconds=0.0
+                        budget_seconds=time.perf_counter()-reading_start if args.eval_mode=='retrieve' else 0.0
                 serial=retrieval_timing['execution_mode']=='serial'
                 retrieval_seconds=retrieval_timing.get('retrieval_seconds')
                 elapsed=retrieval_seconds+reading_seconds+budget_seconds if serial else None
@@ -341,10 +445,17 @@ def run(args):
                 timing_text=f'{elapsed:.3f}s' if serial else f"window={retrieval_timing['retrieval_window_seconds']:.3f}s/{retrieval_timing['window_size']}q; reader={reading_seconds:.3f}s"
                 print(f"{datetime.now():%Y-%m-%d %H:%M:%S} {args.dataset}/{stage}: {i+1}/{len(indices)}; {timing_text}; answer={solution.answer!r}",flush=True)
         profile=accounting(case,rows,recorder,monitor,build,prepare_seconds,prior_seconds+time.perf_counter()-started)
+        cuda=getattr(rag,'_cuda_retrieval_index',None)
+        if cuda is not None:
+            profile['efficiency']['cuda_retrieval']=dict(cuda.stats,ppr_calls=cuda.ppr_calls,
+                ppr_seconds=cuda.ppr_seconds,ppr_max_iterations=cuda.max_iterations)
         if args.query_window>1:
             from utils.window_execution import augment_accounting
             augment_accounting(profile,case,rows)
             profile['measurement_protocol']['execution_protocol']=execution_protocol
+        if args.reader_workers > 1:
+            from utils.parallel_reader import augment_reader_accounting
+            augment_reader_accounting(profile,case,rows,args.reader_workers)
         reviews=[r['retrieval_trace'].get('evidence',{}).get('improvement_support_semantic_veto',{}) for r in rows]
         profile['measurement_protocol']['pack_review_mode']=config.pack.review_mode
         profile['measurement_protocol']['pack_selector_mode']=config.pack.selector_mode
@@ -384,6 +495,16 @@ def run(args):
                 original_build_cost_scope=reused['original_build_unavailable_reason'])
             profile['cost']['shared_original_index']=reused['original_build_usage']
             profile['cost']['shared_original_index_scope']=reused['original_build_unavailable_reason']
+        if args.model_factor_profile and args.model_factor_profile.startswith('dashscope_'):
+            from utils.api_cost import summarize_calls
+            cloud_calls=jsonl(case/'llm_calls.jsonl')
+            cloud_usage=summarize_calls(cloud_calls)
+            profile['cost'].update(currency='CNY',currency_cost=cloud_usage['estimated_cny'],
+                currency_cost_unavailable_reason=None,currency_cost_scope='known physical API usage including index and online; unknown usage stays unknown; excludes local hardware',
+                api_usage=cloud_usage,api_by_phase={phase:summarize_calls([e for e in cloud_calls if e['phase']==phase])
+                    for phase in sorted({e['phase'] for e in cloud_calls})},
+                provider_content_rejections=sum(e.get('metadata',{}).get('provider_rejected',False)
+                    for e in jsonl(case/'llm_logical_calls.jsonl')))
         result=dict(dataset=args.dataset,method='bindpack',stage_ablation=stage,eval_mode=args.eval_mode,
             mechanism_ablation=config.mechanism_ablation,qa_executed=args.eval_mode=='rag_qa',
             data_path=str(data_path),corpus_path=str(metadata/'corpus.json'),selected_indices=indices,
@@ -392,7 +513,7 @@ def run(args):
             accounting=profile,results=rows)
         write_json(case/'result.json',result)
         write_json(case/'validated.ok',dict(result_sha256=sha256(case/'result.json'),protocol_sha256=digest(protocol)))
-        report=write_metric_report(case/'result.json',manifest_path=metadata/'sample_manifest.json',ks=[3,5,8,10,20,200])
+        report=write_metric_report(case/'result.json',manifest_path=metadata/'sample_manifest.json',ks=[1,3,5,8,10,20,200])
         report.update(profile)
         report.update(mechanism_ablation=config.mechanism_ablation,qa_executed=args.eval_mode=='rag_qa')
         report['display_metrics']={k:'N/A' if v is None else v for k,v in report['metrics'].items()}
@@ -422,6 +543,7 @@ def run(args):
 
 def accounting(case,rows,recorder,monitor,build,prepare_seconds,case_seconds):
     from bindpack.evaluation.measurement import jsonl,usage,distribution
+    client_workers=json.loads((case/'protocol.json').read_text())['configuration']['llm_prefetch_workers']
     events=jsonl(case/'llm_calls.jsonl');logical=jsonl(case/'llm_logical_calls.jsonl');emb=jsonl(case/'embedding_calls.jsonl')
     offline=usage([e for e in events if e['phase']=='offline_index'])
     online=usage([e for e in events if e['phase'].startswith('online_')])
@@ -433,7 +555,9 @@ def accounting(case,rows,recorder,monitor,build,prepare_seconds,case_seconds):
         reader_seconds=distribution(r['timing']['reader_seconds'] for r in rows),
         model_load_seconds=sum(x['seconds'] for x in recorder.phases if x['phase']=='model_loading')+
             sum(s.get('model_load_seconds',0) for s in jsonl(case/'execution_sessions.jsonl')),
-        query_concurrency=1,native_llm_concurrency_limit=8,embedding_batch_size=4,
+        query_concurrency=1,native_llm_concurrency_limit=client_workers,
+        embedding_batch_size=json.loads((case/'protocol.json').read_text())['configuration']['embedding_batch_size'],
+        native_llm_concurrency_scope='client thread-pool bound; not the physical vLLM GPU sequence count',
         latency_scope='contiguous native retrieval/planning plus budget preparation and reader; excludes model loading/indexing/checkpoint writing',
         cache_condition='independent application cache; resident index/model; first query retained; shared vLLM cache not reset',
         offline_index=dict(reused=len(jsonl(case/'execution_sessions.jsonl'))>0,original_build_seconds=build['seconds'],
@@ -513,7 +637,8 @@ def validate(case,rows,profile):
                    and d.get('extra_requests')==0 and not d.get('accepted')
                    and d.get('original_parent_doc_ids')==d.get('final_doc_ids') for d in reviews)
     from bindpack.evaluation.mechanism_audit import audit_mechanism_rows
-    mechanism_audit=audit_mechanism_rows(rows,protocol.get('mechanism_ablation','full'))
+    mechanism_audit=audit_mechanism_rows(rows,protocol.get('mechanism_ablation','full'),
+        protocol['configuration'].get('source_bound_eligibility',True))
     return dict(status='passed',queries=len(rows),physical_requests=len(events),logical_calls=len(logical),
         pack_review_mode=review_mode,review_extra_requests=sum(d.get('extra_requests',0) for d in reviews),
         review_accepted_swaps=sum(bool(d.get('accepted')) for d in reviews),
@@ -525,6 +650,14 @@ def validate(case,rows,profile):
 if __name__=='__main__':
     args=parser().parse_args()
     if not args.frozen_worker:freeze_worker(args)
+    if args.model_factor_profile:
+        # CacheOpenAI captures its process-wide HTTP bound on import. Match the
+        # calibrated worker count before importing BindPack rather than silently
+        # throttling a 16/32-worker model-factor experiment to the default eight.
+        settings_path=Path(args.output)/'experiment_config.json' if args.resume else Path(args.config)
+        workers=json.loads(settings_path.read_text())['runtime']['llm_prefetch_workers']
+        os.environ['BINDPACK_LLM_MAX_IN_FLIGHT']=str(workers)
+        print(f'MODEL FACTOR: HTTP in-flight limit={workers}; Reader workers={args.reader_workers}',flush=True)
     os.environ.setdefault('OPENAI_API_KEY','sk-local-dummy')
     os.environ.setdefault('TOKENIZERS_PARALLELISM','false')
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(name)s %(levelname)s %(message)s')

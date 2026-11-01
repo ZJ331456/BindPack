@@ -1,0 +1,4 @@
+{
+  "runtime": {"mechanism_ablation": "full", "source_bound_eligibility": true},
+  "pack": {"review_mode": "off", "selector_mode": "combined", "relation_weight": 0.6}
+}

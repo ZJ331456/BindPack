@@ -12,7 +12,8 @@ class Mechanisms:
 def mechanisms(config):
     arm = getattr(config, "mechanism_ablation", "full")
     return Mechanisms(
-        source_bound_eligibility=arm != "wo_source_bound_eligibility",
+        source_bound_eligibility=(getattr(config, "source_bound_eligibility", True)
+                                  and arm != "wo_source_bound_eligibility"),
         dependency_closure=arm != "wo_dependency_closure",
         joint_selection=arm != "wo_joint_selection",
     )

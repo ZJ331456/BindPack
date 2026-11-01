@@ -16,6 +16,64 @@ from test_evidence_dag_package import Engine,chain
 
 
 class CompleteMechanismTests(TestCase):
+    def test_new_full_and_legacy_unqualified_arm_have_identical_mechanisms(self):
+        from bindpack.stages.mechanisms import mechanisms
+        new=BindPackConfig.from_file('configs/full_no_source_eligibility.json')
+        old=BindPackConfig.from_file(mechanism_ablation='wo_source_bound_eligibility')
+        self.assertEqual(mechanisms(new),mechanisms(old))
+        self.assertEqual(new.pack,old.pack)
+        with self.assertRaises(ValueError):
+            BindPackConfig.from_file(source_bound_eligibility='off')
+
+    def test_both_new_ablations_keep_source_verification_disabled(self):
+        from bindpack.stages.mechanisms import mechanisms
+        for arm in ('full','wo_dependency_closure','wo_joint_selection'):
+            with self.subTest(arm=arm):
+                cfg=BindPackConfig.from_file(mechanism_ablation=arm,source_bound_eligibility=False)
+                flags=mechanisms(cfg)
+                self.assertFalse(flags.source_bound_eligibility)
+                self.assertEqual(flags.dependency_closure,arm!='wo_dependency_closure')
+                self.assertEqual(flags.joint_selection,arm!='wo_joint_selection')
+                runtime=SimpleNamespace(cfg=cfg,_verification_diagnostics={},
+                    _infer_object=lambda messages:({'hypotheses':[{'answer':'Claim','doc_id':'D1','confidence':.5}]},None))
+                with patch('bindpack.stages.plan.source_verifier.verify_hypotheses',side_effect=AssertionError('strict source gate leaked')):
+                    accepted,_,_=SourceVerifier(runtime).verify('Q?','entity',{1:'Unrelated text.'})
+                self.assertFalse(accepted[0]['source_verified'])
+
+    def test_new_full_pack_ranking_matches_legacy_source_ablation(self):
+        old=self.runtime('wo_source_bound_eligibility')
+        state=self.state()
+        new=SimpleNamespace(**vars(old))
+        new.cfg=BindPackConfig.from_file(source_bound_eligibility=False)
+        ids=np.arange(220);scores=np.linspace(1,0,220)
+        a=PackStage(old).finalize('Sample Region',ids,scores,{},deepcopy(state))
+        b=PackStage(new).finalize('Sample Region',ids,scores,{},deepcopy(state))
+        self.assertEqual(a[0].tolist(),b[0].tolist())
+        for key in ('reference_doc_ids','candidate_domain','objective','selected_doc_ids'):
+            self.assertEqual(a[2]['budgeted_selection'][key],b[2]['budgeted_selection'][key])
+
+    def test_combined_no_source_no_dependency_never_invokes_strict_gate_or_closure(self):
+        runtime=self.runtime('wo_dependency_closure')
+        runtime.cfg.source_bound_eligibility=False
+        state=self.state()
+        for node in state['_evidence_plan']:
+            node.update(depends_on=[],question='Independent question about '+node['id'])
+        forbidden=AssertionError('disabled mechanism leaked')
+        with patch('bindpack.stages.pack.dag_package_selector.DAGPackageSelector.select',side_effect=forbidden),\
+             patch('bindpack.stages.pack.budgeted_selector._collect_proofs',side_effect=forbidden),\
+             patch('bindpack.stages.pack.budgeted_selector._ancestors',side_effect=forbidden):
+            result=PackStage(runtime).finalize('Sample Region',np.arange(220),np.linspace(1,0,220),{},state)
+        self.assertEqual(result[2]['budgeted_selection']['package_count'],0)
+
+    def test_combined_no_source_no_joint_never_invokes_joint_solver(self):
+        runtime=self.runtime('wo_joint_selection')
+        runtime.cfg.source_bound_eligibility=False
+        with patch('bindpack.stages.pack.budgeted_selector.BudgetedSelector.select',side_effect=AssertionError('joint leaked')):
+            stage=PackStage(runtime)
+            self.assertFalse(stage.mechanisms.source_bound_eligibility)
+            result=stage.finalize('Sample Region',np.arange(220),np.linspace(1,0,220),{},self.state())
+        self.assertNotIn('budgeted_selection',result[2])
+
     def runtime(self,arm):
         self.engine=Engine()
         return SimpleNamespace(cfg=BindPackConfig.from_file(mechanism_ablation=arm),

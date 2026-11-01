@@ -6,7 +6,7 @@ import json
 from collections import deque
 
 from ...utils.misc_utils import NerRawOutput
-from ..openie.openie_structured_output import guided_json_parameters
+from ..openie.openie_structured_output import structured_request_parameters
 
 
 NER_RECOVERY_VERSION = 'bindpack_bounded_source_span_ner_v1'
@@ -45,10 +45,14 @@ class SourceVerifiedNERMixin:
                     raise ValueError('Whole NER source exceeds the fixed context allowance')
                 response, metadata, hit = self.llm_model.infer(
                     messages=task, max_completion_tokens=512, temperature=0.0,
-                    extra_body=guided_json_parameters(schema))
+                    **structured_request_parameters(self.llm_model, schema))
                 metadata = dict(metadata or {})
                 record.update(raw_response=response, metadata=copy.deepcopy(metadata), cache_hit=hit,
                               prompt_token_count=count)
+                if metadata.get('provider_rejected') and metadata.get('non_retryable'):
+                    metadata.update(complete=False, quality_status='failed', openie_skipped=True,
+                                    ner_attempts=attempts, ner_max_tokens_used=512)
+                    return NerRawOutput(chunk_key, response, [], metadata)
                 if metadata.get('error') or metadata.get('finish_reason') != 'stop':
                     raise ValueError('NER response did not finish with an error-free stop')
                 payload = json.loads(response)
@@ -73,6 +77,8 @@ class SourceVerifiedNERMixin:
         from a matching checkpoint are replayed; only uncovered source spans
         issue new fixed-budget requests. Parents are diagnostics, never leaves.
         """
+        if (previous.metadata or {}).get('non_retryable'):
+            return previous
         from ..openie.openie_atomic_recovery import source_units, _split_span
         digest = hashlib.sha256(passage.encode('utf-8')).hexdigest()
         prior = previous.metadata or {}

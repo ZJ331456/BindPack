@@ -27,12 +27,21 @@ def validate_archive(source, dataset, documents, embedding_model, llm_name, embe
     original_build={};original_usage=None;model_proof=[]
     if manifest_path.is_file():
         manifest=read(manifest_path)
+        measurement=manifest.get('build_measurement')
+        if measurement is not None:
+            report_path=(archive/measurement['path']).resolve()
+            if archive not in report_path.parents or sha(report_path)!=measurement['sha256']:
+                raise ValueError('Invalid archived build measurement')
+            original_build=recorded(report_path)
+            original_usage=original_build['offline_index_usage']
     else:
         if not model.is_dir() or str(manifest_path.relative_to(archive)) in known:
             raise ValueError('Archived index model mismatch or missing model manifest')
         # The original measured HoVer index predates index_manifest.json.
         # Its immutable completed native Full protocol is an independent proof.
-        full=archive/'cases'/dataset/'full'
+        full=archive/'index_provenance'/dataset
+        if not full.is_dir():
+            full=archive/'cases'/dataset/'full'
         proto=recorded(full/'protocol.json');done=recorded(full/'completed.ok')
         report=recorded(full/'report.json');original_build=recorded(full/'index_build.json')
         if done['report_sha256']!=sha(full/'report.json') or proto.get('method')!='bindpack' or proto.get('stage_ablation')!='full':
@@ -76,30 +85,53 @@ def validate_archive(source, dataset, documents, embedding_model, llm_name, embe
         identity_policy='exact full passage texts and model identity; query annotations/hop budgets are separately frozen',
         archived_model_provenance=model_proof,
         original_build_usage=original_usage,original_build_seconds=original_build.get('seconds'),
-        original_build_unavailable_reason=('historical measured Full index build; reference only, not charged again'
+        original_build_unavailable_reason=('measured shared index build; reference only, not charged again'
             if original_build else 'archived graph/vectors are verified; a measured original build ledger is unavailable'))
 
 
-def prepare_archive(source,destination,case,identity,documents,config):
+def prepare_archive(source,destination,case,identity,documents,config,*,extraction_llm_name=None):
     source,destination,case=Path(source).resolve(),Path(destination).resolve(),Path(case)
     if source==destination or source in destination.parents:raise ValueError('Private index overlaps the archived index')
     start=time.perf_counter()
     settings=dict(normalized=config.embedding_return_as_normalized,max_sequence_length=config.embedding_max_seq_len,dtype=config.embedding_model_dtype)
-    receipt=validate_archive(source,identity['dataset'],documents,config.embedding_model_name,config.llm_name,settings)
+    index_llm=extraction_llm_name or config.llm_name
+    receipt=validate_archive(source,identity['dataset'],documents,config.embedding_model_name,index_llm,settings)
+    source_assets=receipt['assets']
+    source_paths={relative:relative for relative in source_assets}
+    if index_llm!=config.llm_name:
+        old_model=index_llm.replace('/','_')+'_'+config.embedding_model_name.replace('/','_')
+        new_model=config.llm_name.replace('/','_')+'_'+config.embedding_model_name.replace('/','_')
+        old_openie='openie_results_ner_'+index_llm.replace('/','_')+'.json'
+        new_openie='openie_results_ner_'+config.llm_name.replace('/','_')+'.json'
+        def target_name(relative):
+            parts=Path(relative).parts
+            if parts[0]==old_model:return str(Path(new_model,*parts[1:]))
+            if relative==old_openie:return new_openie
+            return relative
+        source_paths={target_name(relative):relative for relative in source_assets}
+        if len(source_paths)!=len(source_assets):raise ValueError('Index alias caused an asset collision')
+        receipt.update(assets={target:source_assets[relative] for target,relative in source_paths.items()},
+            source_asset_paths=source_paths,online_llm=config.llm_name,
+            extraction_llm=index_llm,renamed_namespace_only=True,
+            model_scope='graph/OpenIE extracted by the original LLM; online Route/Plan/Reader use the replacement LLM; source manifest bytes unchanged')
     marker=case/'index_reuse.json'
     if marker.exists():
         previous=read(marker)
         for key in ('source','assets','corpus_sha256','models'):
             if previous[key]!=receipt[key]:raise ValueError('Frozen archived index identity changed: '+key)
+        if previous.get('source_asset_paths')!=receipt.get('source_asset_paths'):
+            raise ValueError('Frozen extraction/online model mapping changed')
     destination.mkdir(parents=True,exist_ok=True)
-    needed=sum(item['bytes'] for relative,item in receipt['assets'].items() if not (destination/relative).exists())
-    if shutil.disk_usage(destination).free < needed + 1024**3:
-        raise OSError('Insufficient free space for private index copies and the result/checkpoint reserve')
+    # Try independent copy-on-write clones without reserving their logical size.
+    # copy_file checks physical bytes plus this reserve before a fallback copy.
+    reserve=1024**3
+    if shutil.disk_usage(destination).free < reserve:
+        raise OSError('Insufficient free space for the result/checkpoint reserve')
     for relative,expected in receipt['assets'].items():
-        src=source/relative;target=destination/relative
+        src=source/source_paths[relative];target=destination/relative
         if target.exists():
             if target.is_symlink() or sha(target)!=expected['sha256']:raise ValueError('Private index asset changed: '+str(target))
-        else:copy_file(src,target)
+        else:copy_file(src,target,reserve_bytes=reserve)
         if sha(target)!=expected['sha256'] or target.stat().st_ino==src.stat().st_ino:
             raise ValueError('Invalid private copy of archived asset: '+str(target))
     receipt.update(current_copy_and_verify_seconds=time.perf_counter()-start,
@@ -118,7 +150,8 @@ def verify_private(case, *, release=False):
     """Verify source and private inputs before releasing only verified copies."""
     case=Path(case);receipt=read(case/'index_reuse.json');source=Path(receipt['source']);private=case/'index'
     for relative,expected in receipt['assets'].items():
-        if sha(source/relative)!=expected['sha256']:raise ValueError('Archived source asset changed: '+relative)
+        source_relative=receipt.get('source_asset_paths',{}).get(relative,relative)
+        if sha(source/source_relative)!=expected['sha256']:raise ValueError('Archived source asset changed: '+source_relative)
         path=private/relative
         if not path.is_file() or path.is_symlink() or sha(path)!=expected['sha256']:
             raise ValueError('Private query-only index asset changed: '+relative)

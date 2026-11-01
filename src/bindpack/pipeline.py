@@ -48,7 +48,8 @@ class EvidencePipeline:
                 "semantic_failures": [], "rejected_hypotheses": [],
                 "plan": [], "bindings": {}, "branch_scores": [],
                 "routes": [], "selected_prefix": []}
-        if getattr(self.cfg,'mechanism_ablation','full') != 'full':
+        if (getattr(self.cfg,'mechanism_ablation','full') != 'full'
+                or not mechanisms(self.cfg).source_bound_eligibility):
             trace['mechanism_ablation'] = self.cfg.mechanism_ablation
             trace['mechanisms'] = asdict(mechanisms(self.cfg))
         return trace
@@ -59,6 +60,8 @@ class EvidencePipeline:
         ret = self.rag.llm_model.infer(messages=messages, temperature=0.0)
         response = ret[0] if isinstance(ret, tuple) else ret
         metadata = ret[1] if isinstance(ret, tuple) and len(ret) > 1 else {}
+        if isinstance(metadata, dict) and metadata.get('provider_rejected'):
+            return None, 'provider_content_rejected'
         if isinstance(metadata, dict) and metadata.get("finish_reason") == "length":
             return None, "truncated_response"
         text = self.rag._extract_llm_text(response)

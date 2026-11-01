@@ -25,6 +25,9 @@ def _get_embedding_model_class(embedding_model_name: str = "nvidia/NV-Embed-v2")
     elif "cohere" in embedding_model_name:
         from .Cohere import CohereEmbeddingModel
         return CohereEmbeddingModel
+    elif "bge-m3" in embedding_model_name.lower():
+        from .BGE import BGEM3EmbeddingModel
+        return BGEM3EmbeddingModel
     elif embedding_model_name.startswith("Transformers/") or "Qwen3-Embedding" in embedding_model_name:
         from .Transformers import TransformersEmbeddingModel
         return TransformersEmbeddingModel
