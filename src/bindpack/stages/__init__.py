@@ -1,1 +1,1 @@
-"""Route, Plan and Pack algorithm stages; experiment resources live in configs/."""
+"""Route, Plan and Pack stages used by the Full evaluation entry."""

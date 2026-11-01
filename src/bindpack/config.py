@@ -1,7 +1,6 @@
-"""Public configuration for the four Route/Plan/Pack experiments.
+"""Typed method configuration; Full evaluation uses configuration/defaults.json.
 
-Edit configuration/defaults.json for method parameters; experiment resources
-belong to configs/ablations_qwen3.json. No legacy fields or aliases are accepted.
+Dataset/model resources are frozen by scripts/run_bindpack.py in each run.
 """
 from dataclasses import dataclass, field
 from typing import Literal

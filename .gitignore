@@ -1,8 +1,5 @@
-# Keep the three maintained research documents.
-/docs/*
-!/docs/实验图表.md
-!/docs/指标说明.md
-!/docs/Baseline说明.md
+# Local manuscripts and experiment artifacts are not part of this branch.
+/docs/
 /outputs/
 
 # Python

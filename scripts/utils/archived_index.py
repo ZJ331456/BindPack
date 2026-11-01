@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import time
 
-from .measured_cases import copy_file, read, sha, write
+from .index_copy import copy_file, read, sha, write
 
 
 def validate_archive(source, dataset, documents, embedding_model, llm_name, embedding_settings=None):
