@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Start only the configured Qwen3 service; keep an existing service running.
 set -euo pipefail
-exec /root/anaconda3/bin/python - <<'PY'
+exec /root/anaconda3/envs/bindpack/bin/python - <<'PY'
 import json
 from pathlib import Path
 import subprocess
 import urllib.error
 import urllib.request
 
-root = Path('/root/baseline/scripts/outputs/services')
+root = Path('/root/BindPack/outputs/services')
 root.mkdir(parents=True, exist_ok=True)
 log = root / 'qwen3_reader_055.log'
 try:

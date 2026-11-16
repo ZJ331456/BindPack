@@ -1,0 +1,11 @@
+{
+  "runtime": {
+    "mechanism_ablation": "full",
+    "source_bound_eligibility": false,
+    "pack_mechanism_ablation": "wo_closure_aware_packaging"
+  },
+  "pack": {
+    "selector_mode": "combined",
+    "review_mode": "off"
+  }
+}

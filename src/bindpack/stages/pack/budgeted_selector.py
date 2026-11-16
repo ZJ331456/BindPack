@@ -65,6 +65,10 @@ class BudgetedSelector:
         self.runtime, self.scorer, self.cfg = runtime, scorer, runtime.cfg.pack
         self.mechanisms = mechanisms(runtime.cfg)
         self.ablation = getattr(runtime.cfg,'pack_mechanism_ablation','none')
+        # Strict citation eligibility and answer-to-source attribution are
+        # separate mechanisms. The latter is removed only in Source Binding.
+        self.visible_citations = (self.mechanisms.source_bound_eligibility and
+                                  self.mechanisms.source_binding)
 
     def _visible(self, question, ordered):
         callback = getattr(self.runtime, '_joint_visible', None)
@@ -96,6 +100,16 @@ class BudgetedSelector:
         candidates = deepcopy(state.get('evidence_candidates', {}))
         domain = sorted((set(candidates) & set(parent[:200])) | set(s0), key=parent.index)
         rank = {d: i + 1 for i, d in enumerate(parent)}
+        probe = None
+        probe_sink = getattr(self.runtime, '_pack_diagnostics', None)
+        if probe_sink is True or isinstance(probe_sink, dict):
+            probe_tick = time.perf_counter()
+            from .search_diagnostics import PackDiagnostics
+            if probe_sink is True:
+                probe_sink = {}
+                self.runtime._pack_diagnostics = probe_sink
+            probe = PackDiagnostics(probe_sink, self.ablation, rank, k)
+            probe.seconds += time.perf_counter()-probe_tick
         local = {d: i for i, d in enumerate(domain)}
         bindings = state.get('_evidence_winning_bindings', {})
         ev = state.get('evidence_trace', {})
@@ -111,7 +125,8 @@ class BudgetedSelector:
                 goal = str(proof.get('goal', ''))
                 nid = (goal[4:] if goal.startswith('dag:') else
                        goal[5:] if goal.startswith('flat:') and not self.mechanisms.dependency_closure else None)
-                if (d in candidates and ((not self.mechanisms.source_bound_eligibility and nid in known_nodes) or
+                if (d in candidates and ((not self.mechanisms.source_binding and nid in known_nodes) or
+                        (not self.mechanisms.source_bound_eligibility and nid in known_nodes) or
                         (nid in bindings and normalized_text(proof.get('answer', '')) == normalized_text(bindings[nid]) and
                          branch_matches(proof.get('requirements', {}), bindings)))):
                     candidates[d]['verified'].append(dict(proof))
@@ -129,7 +144,8 @@ class BudgetedSelector:
         diagnostic = {'rejected_proofs': []}
         choices = (_collect_proofs(nodes, bindings, winning, candidates, rank,
                                   self.runtime._document, diagnostic, include_citations=True,
-                                  source_bound_eligibility=self.mechanisms.source_bound_eligibility)
+                                  source_bound_eligibility=self.mechanisms.source_bound_eligibility,
+                                  source_binding=self.mechanisms.source_binding)
                    if self.mechanisms.dependency_closure else {})
         leaves = (set(order) - {p for n in plan for p in n.get('depends_on', [])}
                   if self.mechanisms.dependency_closure else set())
@@ -168,7 +184,8 @@ class BudgetedSelector:
             goal = str(p.get('goal',''))
             nid = goal.split(':',1)[1] if ':' in goal else ''
             d, quote = p.get('doc_id'), str(p.get('evidence',''))
-            if (d in local and ((not self.mechanisms.source_bound_eligibility and nid in nodes) or
+            if (d in local and ((not self.mechanisms.source_binding and nid in nodes) or
+                    (not self.mechanisms.source_bound_eligibility and nid in nodes) or
                     (nid in bindings and len(quote)>=8 and quote in self.runtime._document(d)
                      and normalized_text(p.get('answer','')) == normalized_text(bindings[nid])
                      and normalized_text(p.get('answer','')) in normalized_text(quote)
@@ -176,7 +193,7 @@ class BudgetedSelector:
                 retention.setdefault(nid,[]).append({'doc_id':d,'evidence':quote})
         base_visible, base_budget = self._visible(question, s0)
         supported0 = {n for n in retention if any(p['doc_id'] in s0 and
-                      (not self.mechanisms.source_bound_eligibility or
+                      (not self.visible_citations or
                        p['evidence'] in base_visible.get(p['doc_id'], '')) for p in retention[n])}
         rho = self.cfg.joint_soft_weight if features.get('residual') else 0
         # A missing proof channel carries no information. In residual variants
@@ -185,10 +202,10 @@ class BudgetedSelector:
         if features.get('residual') and not choices:
             rho = 1.0
         loss_weight = self.cfg.joint_loss_weight if features.get('risk') else 0
-        def evaluate(selected, visible=None, control=False):
+        def evaluate(selected, visible=None, control=False, stage='expansion'):
             indexes = [local[d] for d in selected]
             closed = (closed_nodes(selected, choices, ancestors, order, visible,
-                                   source_bound_eligibility=self.mechanisms.source_bound_eligibility)
+                                   source_bound_eligibility=self.visible_citations)
                       if self.mechanisms.dependency_closure else set())
             closure = (len(closed) / max(1, len(order)) + len(closed & leaves) / max(1, len(leaves))) / 2
             if visible is None:
@@ -205,60 +222,121 @@ class BudgetedSelector:
             coverage = sum(channels)/len(channels) if channels else 0
             red = sum(redundancy[a, b] for a, b in combinations(indexes, 2)) / max(1, k * (k - 1) / 2)
             lost = {n for n in supported0 if not any(p['doc_id'] in selected and
-                    (not self.mechanisms.source_bound_eligibility or visible is None or
+                    (not self.visible_citations or visible is None or
                      p['evidence'] in visible.get(p['doc_id'], '')) for p in retention[n])}
             loss = len(lost) / max(1, len(supported0))
             mode='none' if control else self.ablation
             reward_closure=closure
-            if mode=='flat_dependency_support':
-                supported=local_supported_nodes(selected,choices,order,visible,self.mechanisms.source_bound_eligibility)
-                reward_closure=(len(supported)/max(1,len(order))+len(supported&leaves)/max(1,len(leaves)))/2
+            supported = None
+            if mode in {'flat_dependency_support','wo_closure_aware_packaging'}:
+                supported=local_supported_nodes(selected,choices,order,visible,self.visible_citations)
+                reward_closure=len(supported)/max(1,len(order))
             reward_coverage=0. if mode=='wo_residual_coverage' else coverage
             effective_loss_weight=0. if mode=='wo_support_retention' else loss_weight
             value = float(rel[indexes].sum() / k + self.cfg.coverage_weight * ((1-rho)*reward_closure + rho*reward_coverage)
                           - self.cfg.redundancy_weight*red - effective_loss_weight*loss)
+            if probe is not None:
+                # Counterfactual diagnostics score the exact same features and
+                # selected set. They never enter the real search state budget.
+                tick = time.perf_counter()
+                observer_before = probe.seconds
+                if supported is None:
+                    supported = local_supported_nodes(selected, choices, order, visible, self.visible_citations)
+                flat = len(supported)/max(1,len(order))
+                full_value = float(rel[indexes].sum() / k + self.cfg.coverage_weight * ((1-rho)*closure + rho*reward_coverage)
+                                   - self.cfg.redundancy_weight*red - effective_loss_weight*loss)
+                flat_value = float(rel[indexes].sum() / k + self.cfg.coverage_weight * ((1-rho)*flat + rho*reward_coverage)
+                                   - self.cfg.redundancy_weight*red - effective_loss_weight*loss)
+                probe.score(selected, stage, closure, flat, value, full_value, flat_value,
+                    mode, visible is not None, dict(relevance=float(rel[indexes].sum()/k),
+                    H=coverage, redundancy=red, support_loss=loss,
+                    control=control, effective_mode=('full_bank_control' if control else
+                        'flat_node_support' if mode in {'flat_dependency_support','wo_closure_aware_packaging'}
+                        else 'ancestor_closed'),
+                    closed_nodes=sorted(closed), locally_supported_nodes=sorted(supported)))
+                # Include caller-side row construction as observer time too.
+                probe.seconds = observer_before + time.perf_counter()-tick
             return value, {'closed_nodes': sorted(closed), 'predicted_closure': closure,
+                           'reward_support': reward_closure,
                            'soft_coverage': coverage, 'lexical_coverage':lexical,
                            'route_goal_coverage':route_coverage,'redundancy': red, 'lost_support': sorted(lost)}
-        packages = _package_sets(choices, ancestors, order) if self.mechanisms.dependency_closure else []
+        algorithm_now = (time.perf_counter if probe is None else lambda: time.perf_counter()-probe.seconds)
+        if probe is not None:
+            probe.timings['feature_setup_seconds'] = algorithm_now()-started
+        tick = algorithm_now() if probe is not None else 0
+        if self.mechanisms.dependency_closure:
+            packages = _package_sets(choices, ancestors, order)
+            if probe is not None:
+                # Count duplicate assignments in an observer-only pass. The
+                # original generator and its order remain the algorithm input.
+                extra = time.perf_counter()
+                observed = _package_sets(choices, ancestors, order, diagnostics=probe.package_stats)
+                assert observed == packages
+                probe.seconds += time.perf_counter()-extra
+        else:
+            packages = []
         packages = [p & set(domain) for p in packages if p <= set(domain) and len(p | fixed) <= k]
+        if probe is not None:
+            probe.timings['package_generation_seconds'] = algorithm_now()-tick
         # Score controls share the Full-generated, capped package bank. Only the
         # explicit action control removes packages; rho never reallocates weights.
-        packages.sort(key=lambda p: (-evaluate(fixed | p,control=True)[0], len(p), tuple(sorted(rank[d] for d in p))))
+        tick = algorithm_now() if probe is not None else 0
+        packages.sort(key=lambda p: (-evaluate(fixed | p,control=True,stage='package_bank_control_full')[0], len(p), tuple(sorted(rank[d] for d in p))))
         bank=packages[:self.cfg.joint_package_cap]
-        package_actions=[] if self.ablation=='singleton_search' else bank
+        if probe is not None:
+            probe.timings['package_bank_ranking_seconds'] = algorithm_now()-tick
+        package_actions=[] if self.ablation in {'singleton_search','wo_closure_aware_packaging'} else bank
         units = [frozenset([d]) for d in domain if d not in fixed] + package_actions
+        singleton_action_count = len(units)-len(package_actions)
         buckets = {n: {} for n in range(fixed_count, k+1)}
-        buckets[fixed_count][fixed] = evaluate(fixed)[0]
-        buckets[k][frozenset(s0)] = evaluate(s0)[0]
+        buckets[fixed_count][fixed] = evaluate(fixed, stage='initial')[0]
+        buckets[k][frozenset(s0)] = evaluate(s0, stage='initial')[0]
+        if probe is not None:
+            probe.seed(fixed, 'empty_seed' if not fixed else 'fixed_prefix_seed')
+            probe.seed(frozenset(s0), 'reference_seed')
         expanded, timed_out, limit_reason = 0, False, None
-        deadline = time.perf_counter() + self.cfg.joint_search_seconds
+        tick = algorithm_now() if probe is not None else 0
+        deadline = algorithm_now() + self.cfg.joint_search_seconds
         for size in range(fixed_count, k):
             frontier = sorted(buckets[size], key=lambda s: (-buckets[size][s], tuple(sorted(rank[d] for d in s))))[:self.cfg.joint_beam_width]
+            if probe is not None:
+                probe.frontier(size, buckets[size], frontier)
             for selected in frontier:
-                for unit in units:
-                    if expanded >= self.cfg.joint_state_cap or (expanded % 32 == 0 and time.perf_counter() >= deadline):
+                for unit_index, unit in enumerate(units):
+                    if expanded >= self.cfg.joint_state_cap or (expanded % 32 == 0 and algorithm_now() >= deadline):
                         timed_out = True
                         limit_reason = 'state_cap' if expanded >= self.cfg.joint_state_cap else 'deadline'
                         break
                     new = selected | unit
                     if len(new) > k or len(new) <= size or new in buckets[len(new)]:
+                        if probe is not None:
+                            outcome = ('budget_skip' if len(new)>k else 'no_growth' if len(new)<=size else 'duplicate')
+                            probe.action(selected, unit, new,
+                                         'individual' if unit_index<singleton_action_count else 'package', outcome)
                         continue
                     buckets[len(new)][new] = evaluate(new)[0]
+                    if probe is not None:
+                        probe.action(selected, unit, new,
+                                     'individual' if unit_index<singleton_action_count else 'package', 'new_unique')
                     expanded += 1
                 if timed_out: break
             if timed_out: break
+        if probe is not None:
+            probe.timings['bounded_search_seconds'] = algorithm_now()-tick
         finalists = sorted(buckets[k], key=lambda s: (-buckets[k][s], len(s-set(s0)), tuple(sorted(rank[d] for d in s))))[:3]
         if frozenset(s0) not in finalists: finalists.append(frozenset(s0))
         measured = []
+        tick = algorithm_now() if probe is not None else 0
         for selected in finalists:
             ordered = tuple(d for d in parent if d in selected)
             visible, budget = (base_visible, base_budget) if ordered == s0 else self._visible(question, ordered)
-            value, details = evaluate(selected, visible)
+            value, details = evaluate(selected, visible, stage='reader_visible')
             measured.append((value, -len(selected-set(s0)), tuple(-rank[d] for d in ordered), ordered, details, budget))
         chosen = max(measured, key=lambda x: x[:3])
         base_checked = next(x for x in measured if x[3] == s0)
         if chosen[0] <= base_checked[0] + 1e-10: chosen = base_checked
+        if probe is not None:
+            probe.timings['reader_visible_rescoring_seconds'] = algorithm_now()-tick
         final = list(chosen[3]) + [d for d in parent if d not in chosen[3]]
         assert final[:fixed_count] == parent[:fixed_count] and set(final[:200]) == set(parent[:200])
         assert set(final) == set(parent) and len(final) == len(set(final))
@@ -268,10 +346,11 @@ class BudgetedSelector:
                                       selection_source='budgeted_selector') for d in chosen[3]]
         out['budgeted_selection'] = dict(enabled=True, mode=self.cfg.selector_mode, features=features,
             pack_mechanism_ablation=self.ablation,
+            source_binding=self.mechanisms.source_binding,
             full_package_bank=[sorted(p) for p in bank],package_action_count=len(package_actions),
             reward_loss_weight=0. if self.ablation=='wo_support_retention' else loss_weight,
             residual_reward_enabled=self.ablation!='wo_residual_coverage',
-            closure_reward_mode='flat' if self.ablation=='flat_dependency_support' else 'ancestor_closed',
+            closure_reward_mode='flat' if self.ablation in {'flat_dependency_support','wo_closure_aware_packaging'} else 'ancestor_closed',
             gold_labels_used=False, model_requests=0, reference_doc_ids=list(s0), selected_doc_ids=list(chosen[3]),
             candidate_domain=domain, eligible_proofs=choices, retention_sources=retention,
             source_records_considered=len(ev.get('source_records', [])),
@@ -284,4 +363,17 @@ class BudgetedSelector:
             seconds=time.perf_counter()-started, reader_budget=chosen[5],
             fixed_prefix=fixed_count,top2_preserved=final[:2]==parent[:2], top200_set_preserved=True, approximate_search=True,
             entailment_guaranteed=False)
+        if probe is not None:
+            wall = time.perf_counter()-started
+            weights = dict(lambda_=self.cfg.coverage_weight, eta_configured=self.cfg.joint_soft_weight,
+                rho_effective=rho, closure_coefficient=self.cfg.coverage_weight*(1-rho),
+                soft_coefficient=self.cfg.coverage_weight*rho, relevance_base=self.cfg.base_weight,
+                relevance_goal=self.cfg.relation_weight, redundancy_coefficient=self.cfg.redundancy_weight,
+                support_loss_coefficient=0. if self.ablation=='wo_support_retention' else loss_weight)
+            weights['lambda'] = weights.pop('lambda_')
+            summary = probe.finish(weights=weights, packages=packages, bank=bank,
+                package_actions=package_actions, finalists=finalists, chosen=chosen[3], s0=s0,
+                expanded=expanded, buckets=buckets, algorithm_seconds=wall-probe.seconds, wall_seconds=wall)
+            out['budgeted_selection']['pack_diagnostics'] = summary
+            out['budgeted_selection']['seconds'] = summary['timings']['algorithm_seconds']
         return np.asarray(final, int), np.linspace(1, 0, len(final), endpoint=False), out

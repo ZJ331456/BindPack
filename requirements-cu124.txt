@@ -1,0 +1,23 @@
+# Install with: python -m pip install -r requirements-cu124.txt
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+vllm==0.8.5.post1
+transformers==4.51.3
+sentence-transformers==4.1.0
+xgrammar==0.1.18
+openai==1.75.0
+litellm==1.68.2
+numpy>=2.0.2,<2.3
+igraph
+pandas
+pyarrow
+psutil
+tiktoken
+accelerate
+boto3
+filelock
+tenacity
+tqdm
+-e .

@@ -4,8 +4,9 @@ from __future__ import annotations
 from typing import Dict, List
 import numpy as np
 from ...utils.evidence import normalized_text
-from .answer_binder import bind_question
+from .answer_binder import bind_question, describe_parent_questions
 from .validation import plan_layers
+from ..mechanisms import mechanisms
 
 
 class DependencyExecutor:
@@ -16,6 +17,7 @@ class DependencyExecutor:
         self.verifier = verifier
         self.config = runtime.cfg.plan
         self.beam_width = int(self.config.beam_width)
+        self.propagate = mechanisms(runtime.cfg).parent_answer_propagation
 
     @staticmethod
     def _beam_score(beam: dict, total: int) -> float:
@@ -48,6 +50,12 @@ class DependencyExecutor:
         for state in active:
             state["_evidence_layers"] = plan_layers(state["_evidence_plan"])
             state["_evidence_beams"] = [{"bindings": {}, "proofs": {}, "qualities": []}]
+            if not self.propagate or getattr(self.runtime.cfg.pack, "selector_mode", "current") != "current":
+                state["evidence_trace"]["execution_mode"] = (
+                    "dependency_answer_propagation" if self.propagate else "dependency_parent_question_descriptions")
+                state["evidence_trace"]["parent_answer_propagation"] = self.propagate
+                state["evidence_trace"]["dependency_edges_executed"] = sum(
+                    len(node["depends_on"]) for node in state["_evidence_plan"])
         depth = max((len(s["_evidence_layers"]) for s in active), default=0)
         for level in range(depth):
             tasks, task_lookup = [], {}
@@ -57,13 +65,14 @@ class DependencyExecutor:
                     continue
                 for node in state["_evidence_layers"][level]:
                     for beam_index, beam in enumerate(state["_evidence_beams"]):
-                        question = bind_question(node["question"], beam["bindings"])
+                        question = (bind_question(node["question"], beam["bindings"]) if self.propagate else
+                                    describe_parent_questions(node["question"], state["_evidence_plan"]))
                         if question is None:
                             state["evidence_trace"]["semantic_failures"].append({
                                 "node": node["id"], "reason": "unbound_dependency",
                                 "requirements": list(node["depends_on"])})
                             continue
-                        requirements = dict(beam["bindings"])
+                        requirements = dict(beam["bindings"]) if self.propagate else {}
                         ids = self.runtime._add_route(state, f"dag:{node['id']}", f"dag:{node['id']}", question, requirements)
                         if not ids:
                             continue
@@ -90,9 +99,18 @@ class DependencyExecutor:
                     hyp["quality"] = float(0.6 * self.runtime.rank_constant / (self.runtime.rank_constant + local_rank)
                                            + 0.4 * hyp["confidence"])
                 hypotheses.sort(key=lambda h: (-h["quality"], h["doc_id"], normalized_text(h["answer"])))
+                # Preserve the exact extraction pool independently of the model's
+                # answer-to-document claims. Source Binding ablation consumes
+                # only this pool and one node-level score.
+                if (getattr(self.runtime.cfg.pack, "selector_mode", "current") != "current" or
+                        getattr(self.runtime, "capture_extraction_inputs", False) or not self.propagate):
+                    trace.setdefault("extraction_inputs", []).append({
+                        "node": node["id"], "doc_ids": list(ids),
+                        "quality": max((hyp["quality"] for hyp in hypotheses), default=0.0)})
                 # Preserve returned source alternatives without changing the
                 # selected answer branch or making another verification call.
-                requirements = dict(state["_evidence_beams"][beam_index]["bindings"])
+                requirements = (dict(state["_evidence_beams"][beam_index]["bindings"])
+                                if self.propagate else {})
                 if (getattr(self.runtime, 'capture_source_alternatives', False) or
                         getattr(self.runtime.cfg.pack, 'selector_mode', 'current') != 'current'):
                     trace.setdefault("source_records", []).extend(

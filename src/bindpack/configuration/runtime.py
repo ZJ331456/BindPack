@@ -61,13 +61,15 @@ class RuntimeConfig:
         from .validation import validate_runtime
         validate_runtime(self)
         if self.mechanism_ablation not in {
-            "full", "wo_source_bound_eligibility", "wo_dependency_closure", "wo_joint_selection"
+            "full", "wo_source_bound_eligibility", "wo_dependency_closure", "wo_joint_selection",
+            "wo_source_binding", "wo_parent_answer_propagation"
         }:
             raise ValueError("Unknown mechanism_ablation")
         if not isinstance(self.source_bound_eligibility, bool):
             raise ValueError("source_bound_eligibility must be a bool")
         if self.pack_mechanism_ablation not in {'none','flat_dependency_support',
-                'wo_support_retention','wo_residual_coverage','singleton_search'}:
+                'wo_support_retention','wo_residual_coverage','singleton_search',
+                'wo_closure_aware_packaging'}:
             raise ValueError('Unknown pack_mechanism_ablation')
         if not isinstance(self.openie_strict, bool):
             raise ValueError('openie_strict must be a bool')

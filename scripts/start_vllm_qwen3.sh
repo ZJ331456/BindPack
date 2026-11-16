@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Shared Qwen3-8B service. GPU headroom is reserved for Qwen3-Embedding-8B.
 set -euo pipefail
-VLLM_PYTHON="${VLLM_PYTHON:-/root/anaconda3/envs/vllm/bin/python}"
-QWEN_RUNTIME="${QWEN_RUNTIME:-/root/.cache/pathcondrag/runtime_deps_qwen3_tf4513}"
-export PYTHONPATH="${QWEN_RUNTIME}${PYTHONPATH:+:${PYTHONPATH}}"
+VLLM_PYTHON="${VLLM_PYTHON:-/root/anaconda3/envs/bindpack/bin/python}"
+QWEN_RUNTIME="${QWEN_RUNTIME:-}"
+if [[ -d "${QWEN_RUNTIME}" ]]; then
+  export PYTHONPATH="${QWEN_RUNTIME}${PYTHONPATH:+:${PYTHONPATH}}"
+fi
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.55}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"

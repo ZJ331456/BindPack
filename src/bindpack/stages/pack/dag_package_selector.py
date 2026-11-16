@@ -110,7 +110,7 @@ def _proof_relation(node, question, proof, document, bindings):
 
 
 def _collect_proofs(nodes, bindings, winning, candidates, rank, document, diagnostic,
-                    include_citations=False, source_bound_eligibility=True):
+                    include_citations=False, source_bound_eligibility=True, source_binding=True):
     choices = {nid: [] for nid in nodes}
     for nid, proof in winning.get("proofs", {}).items():
         if nid in choices and isinstance(proof, dict):
@@ -140,6 +140,14 @@ def _collect_proofs(nodes, bindings, winning, candidates, rank, document, diagno
             seen.add((doc_id, answer, quote))
             requirements = raw.get("requirements", {})
             source = document(doc_id) if doc_id in rank and rank[doc_id] <= 200 else ""
+            if not source_binding:
+                if (not raw.get("unbound_extraction_candidate") or doc_id not in candidates or
+                        doc_id not in rank or rank[doc_id] > 200):
+                    continue
+                checked.append({"doc_id": doc_id, "check": "unbound_extraction_candidate",
+                                "confidence": confidence if math.isfinite(confidence) else 0.0,
+                                "source_verified": False})
+                continue
             if not source_bound_eligibility:
                 if doc_id not in candidates or doc_id not in rank or rank[doc_id] > 200:
                     diagnostic["rejected_proofs"].append({"node":nid,"doc_id":doc_id,
@@ -203,21 +211,37 @@ def _closed_coverage(selected, choices, ancestors, node_order):
     return covered
 
 
-def _package_sets(choices, ancestors, node_order):
+def _package_sets(choices, ancestors, node_order, diagnostics=None):
     """Enumerate source alternatives for every supported ancestor-closed subset."""
     packages, seen = [], set()
+    if diagnostics is not None:
+        diagnostics.update(closed_node_subsets=0, generated_assignments=0, duplicate_assignments=0,
+                           generated_singleton_assignments=0, generated_multi_passage_assignments=0)
     for mask in range(1, 1 << len(node_order)):
         subset = {nid for i, nid in enumerate(node_order) if mask & (1 << i)}
         if any(nid not in choices or not ancestors[nid] <= subset for nid in subset):
             continue
+        if diagnostics is not None:
+            diagnostics['closed_node_subsets'] += 1
         ordered = [nid for nid in node_order if nid in subset]
         for assignment in product(*(choices[nid] for nid in ordered)):
+            if diagnostics is not None:
+                diagnostics['generated_assignments'] += 1
             docs = frozenset(p["doc_id"] for p in assignment)
+            if diagnostics is not None:
+                diagnostics['generated_singleton_assignments' if len(docs)==1 else
+                            'generated_multi_passage_assignments'] += 1
             # Different node subsets may share the same documents. Coverage is
             # recalculated from all their supported facts, so one doc set suffices.
             if docs not in seen:
                 seen.add(docs)
                 packages.append(docs)
+            elif diagnostics is not None:
+                diagnostics['duplicate_assignments'] += 1
+    if diagnostics is not None:
+        diagnostics['unique_generated_packages'] = len(packages)
+        diagnostics['unique_generated_singleton_packages'] = sum(len(p)==1 for p in packages)
+        diagnostics['unique_generated_multi_passage_packages'] = sum(len(p)>1 for p in packages)
     return packages
 
 

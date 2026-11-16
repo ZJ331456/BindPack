@@ -7,6 +7,8 @@ class Mechanisms:
     source_bound_eligibility: bool = True
     dependency_closure: bool = True
     joint_selection: bool = True
+    source_binding: bool = True
+    parent_answer_propagation: bool = True
 
 
 def mechanisms(config):
@@ -16,4 +18,6 @@ def mechanisms(config):
                                   and arm != "wo_source_bound_eligibility"),
         dependency_closure=arm != "wo_dependency_closure",
         joint_selection=arm != "wo_joint_selection",
+        source_binding=arm != "wo_source_binding",
+        parent_answer_propagation=arm not in {"wo_dependency_closure", "wo_parent_answer_propagation"},
     )

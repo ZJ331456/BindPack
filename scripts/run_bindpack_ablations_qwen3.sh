@@ -2,7 +2,7 @@
 # Four whole-stage controls with one new Qwen3 embedding index per dataset.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RAG_PYTHON="${RAG_PYTHON:-/root/anaconda3/envs/rag/bin/python}"
+RAG_PYTHON="${RAG_PYTHON:-/root/anaconda3/envs/bindpack/bin/python}"
 export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=42
 export TOKENIZERS_PARALLELISM=false OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 ARGS=()
